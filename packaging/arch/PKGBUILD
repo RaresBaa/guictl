@@ -1,0 +1,62 @@
+# Maintainer: RaresBaa <rares.barbita@gmail.com>
+
+pkgname=guictl-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc="Control a desktop GUI from the command line, for AI agents (KDE Plasma 6 on Wayland)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/RaresBaa/guictl"
+license=('MIT')
+depends=(
+  'glibc'
+  'libgcc'
+  'at-spi2-core'       # element commands
+  'kservice'           # kbuildsycoca6, for guictl setup
+  'libkscreen'         # kscreen-doctor, for monitor commands
+  'libpulse'           # pactl, for audio commands
+  'tesseract'          # ocr
+  'tesseract-data-eng' # tesseract alone may pull in a different language
+  'wl-clipboard'       # clipboard commands
+  'xdg-utils'          # xdg-open, for launch
+)
+makedepends=('cargo' 'git')
+provides=('guictl')
+conflicts=('guictl')
+source=("git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd guictl
+  # The crate version, then the commit count and hash, so that a newer
+  # commit always sorts as a newer package.
+  printf '%s.r%s.g%s' \
+    "$(sed -n 's/^version = "\(.*\)"/\1/p' guictl/Cargo.toml)" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd guictl
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd guictl
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd guictl
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --release
+}
+
+package() {
+  cd guictl
+  install -Dm755 target/release/guictl "$pkgdir/usr/bin/guictl"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

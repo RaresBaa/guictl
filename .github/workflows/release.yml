@@ -1,0 +1,80 @@
+name: Release
+
+# Runs only when a version tag is pushed:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # The oldest Ubuntu image, so the binary also runs on distributions
+          # with an older glibc.
+          - os: ubuntu-22.04
+            name: x86_64-linux
+          - os: windows-latest
+            name: x86_64-windows
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check that the tag matches the version in Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' guictl/Cargo.toml)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in guictl/Cargo.toml"
+            exit 1
+          fi
+
+      - run: cargo test --release --locked
+      - run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          dir="guictl-$GITHUB_REF_NAME-${{ matrix.name }}"
+          mkdir "$dir"
+          cp README.md LICENSE "$dir"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp target/release/guictl.exe "$dir"
+            7z a "$dir.zip" "$dir"
+          else
+            cp target/release/guictl "$dir"
+            tar -czf "$dir.tar.gz" "$dir"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            guictl-*.zip
+            guictl-*.tar.gz
+          if-no-files-found: error
+
+  # Publishes only after every build succeeded, so a release never has some
+  # of its files missing.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+
+      - run: sha256sum guictl-* > SHA256SUMS
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" guictl-* SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

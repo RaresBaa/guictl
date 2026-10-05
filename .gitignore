@@ -1,0 +1,5 @@
+/target
+/result
+# makepkg leaves these next to the PKGBUILD
+/packaging/arch/*
+!/packaging/arch/PKGBUILD
