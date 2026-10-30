@@ -14,6 +14,25 @@ fn main() {
         print!("{}", guide::text());
         return;
     }
+    #[cfg(all(windows, not(guictl_stub)))]
+    {
+        use platform::os::elevate;
+        let elevated = if let Some(base) = &cli.elevated_output {
+            elevate::attach(base, cli.elevated_cwd.as_deref()).map(|()| None)
+        } else if cli.elevate {
+            elevate::relaunch(&cli.command).map(Some)
+        } else {
+            Ok(None)
+        };
+        match elevated {
+            Ok(None) => {}
+            Ok(Some(code)) => std::process::exit(code),
+            Err(err) => {
+                output::print_err(&err, pretty);
+                std::process::exit(err.exit_code);
+            }
+        }
+    }
     match commands::dispatch(cli.command) {
         Ok(value) => {
             output::print_ok(value, pretty);

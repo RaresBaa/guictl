@@ -213,9 +213,37 @@ fn draw_grid(img: &mut RgbaImage, origin_x: i32, origin_y: i32) {
     }
 }
 
-fn window_origin(id: &str) -> Result<(i32, i32), CmdError> {
-    let (x, y, _, _) = super::window::rect(super::window::parse_id(id)?)?;
-    Ok((x, y))
+/// Puts images together on a canvas just big enough for them, in the order
+/// given, and returns it with its top-left corner in desktop pixels.
+fn compose(mut layers: Vec<(RgbaImage, i32, i32)>) -> (RgbaImage, i32, i32) {
+    if layers.len() == 1 {
+        return layers.remove(0);
+    }
+    let left = layers.iter().map(|l| l.1).min().unwrap_or(0);
+    let top = layers.iter().map(|l| l.2).min().unwrap_or(0);
+    let right = layers.iter().map(|l| l.1 + l.0.width() as i32).max().unwrap_or(0);
+    let bottom = layers.iter().map(|l| l.2 + l.0.height() as i32).max().unwrap_or(0);
+    let mut canvas = RgbaImage::new((right - left) as u32, (bottom - top) as u32);
+    for (image, x, y) in &layers {
+        image::imageops::overlay(&mut canvas, image, (x - left) as i64, (y - top) as i64);
+    }
+    (canvas, left, top)
+}
+
+/// A window with its open menus and dropdowns on it. They can reach past the
+/// window, and then the image grows to show them whole.
+fn capture_window(id: &str, cursor: bool) -> Result<(RgbaImage, i32, i32), CmdError> {
+    let window = super::window::with_popups(super::window::parse_id(id)?)?;
+    let mut layers = vec![(capture(&Target::Window(id), cursor)?, window.x, window.y)];
+    for popup in window.popups {
+        match capture(&Target::Window(&popup.id), cursor) {
+            Ok(image) => layers.push((image, popup.x, popup.y)),
+            // It closed in the meantime, so it isn't on screen any more.
+            Err(e) if e.code == "not_found" => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(compose(layers))
 }
 
 /// Top-left corner of the whole desktop, which isn't 0,0 when a monitor sits
@@ -236,21 +264,30 @@ fn workspace_origin() -> Result<(i32, i32), CmdError> {
 pub(crate) fn capture_raw(
     monitor: Option<&str>,
     window: Option<&str>,
+    region: Option<&str>,
 ) -> Result<(RgbaImage, i32, i32), CmdError> {
-    let (target, (x, y)) = match (monitor, window) {
-        (Some(_), Some(_)) => {
-            return Err(CmdError::invalid_args("specify at most one of --monitor, --window"))
-        }
-        (None, Some(id)) => (Target::Window(id), window_origin(id)?),
-        (Some(id), None) => {
+    let (target, (x, y)) = match (monitor, window, region) {
+        (None, Some(id), None) => return capture_window(id, false),
+        (Some(id), None, None) => {
             let m = super::monitor::find(id)?;
             (Target::Monitor(id), (m.x, m.y))
         }
-        (None, None) => (Target::Workspace, workspace_origin()?),
+        (None, None, Some(spec)) => {
+            let rect = parse_region(spec)?;
+            if rect.w <= 0 || rect.h <= 0 {
+                return Err(CmdError::invalid_args("capture area has zero size"));
+            }
+            let origin = (rect.x, rect.y);
+            (Target::Region(rect), origin)
+        }
+        (None, None, None) => (Target::Workspace, workspace_origin()?),
+        _ => return Err(CmdError::invalid_args("specify at most one of --monitor, --window, --region")),
     };
     Ok((capture(&target, false)?, x, y))
 }
 
+/// Width, height and PNG bytes, plus for `window` where the image's top-left
+/// corner is on the desktop: an open popup can move it off the window's corner.
 pub fn take(
     monitor: Option<&str>,
     window: Option<&str>,
@@ -258,7 +295,7 @@ pub fn take(
     scale: Option<f32>,
     cursor: bool,
     grid: bool,
-) -> Result<(u32, u32, Vec<u8>), CmdError> {
+) -> Result<(u32, u32, Vec<u8>, Option<(i32, i32)>), CmdError> {
     let specified = [monitor.is_some(), window.is_some(), region.is_some()]
         .iter()
         .filter(|&&b| b)
@@ -269,23 +306,24 @@ pub fn take(
         ));
     }
 
-    let (target, origin) = if let Some(id) = window {
-        (Target::Window(id), if grid { window_origin(id)? } else { (0, 0) })
+    let (mut img, origin) = if let Some(id) = window {
+        let (img, x, y) = capture_window(id, cursor)?;
+        (img, (x, y))
     } else if let Some(id) = monitor {
         let m = super::monitor::find(id)?;
-        (Target::Monitor(id), (m.x, m.y))
+        (capture(&Target::Monitor(id), cursor)?, (m.x, m.y))
     } else if let Some(spec) = region {
         let rect = parse_region(spec)?;
         if rect.w <= 0 || rect.h <= 0 {
             return Err(CmdError::invalid_args("capture area has zero size"));
         }
         let origin = (rect.x, rect.y);
-        (Target::Region(rect), origin)
+        (capture(&Target::Region(rect), cursor)?, origin)
     } else {
-        (Target::Workspace, if grid { workspace_origin()? } else { (0, 0) })
+        let origin = if grid { workspace_origin()? } else { (0, 0) };
+        (capture(&Target::Workspace, cursor)?, origin)
     };
 
-    let mut img = capture(&target, cursor)?;
     if grid {
         draw_grid(&mut img, origin.0, origin.1);
     }
@@ -303,7 +341,7 @@ pub fn take(
     let mut bytes: Vec<u8> = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
         .map_err(|e| CmdError::os(format!("could not encode the screenshot: {e}")))?;
-    Ok((width, height, bytes))
+    Ok((width, height, bytes, window.map(|_| origin)))
 }
 
 #[cfg(test)]
@@ -316,6 +354,28 @@ mod tests {
         assert_eq!((r.x, r.y, r.w, r.h), (10, 20, 300, 400));
         let r = parse_region("-1920,0,800,600").unwrap();
         assert_eq!(r.x, -1920);
+    }
+
+    #[test]
+    fn a_window_without_popups_stays_as_it_is() {
+        let (image, x, y) = compose(vec![(RgbaImage::new(30, 20), 100, 200)]);
+        assert_eq!((image.dimensions(), x, y), ((30, 20), 100, 200));
+    }
+
+    #[test]
+    fn popups_land_where_they_are_on_the_desktop_and_grow_the_image() {
+        let red = Rgba([255, 0, 0, 255]);
+        let blue = Rgba([0, 0, 255, 255]);
+        let (image, x, y) = compose(vec![
+            (RgbaImage::from_pixel(10, 10, red), 100, 100),
+            (RgbaImage::from_pixel(4, 4, blue), 108, 95),
+        ]);
+        assert_eq!((image.dimensions(), x, y), ((12, 15), 100, 95));
+        assert_eq!(*image.get_pixel(0, 5), red);
+        assert_eq!(*image.get_pixel(8, 0), blue);
+        assert_eq!(*image.get_pixel(11, 3), blue);
+        assert_eq!(*image.get_pixel(0, 0), Rgba([0, 0, 0, 0]));
+        assert_eq!(*image.get_pixel(11, 14), Rgba([0, 0, 0, 0]));
     }
 
     #[test]

@@ -8,10 +8,15 @@ use crate::output::CmdError;
 
 pub const IMPLEMENTED: &[&str] = &["capabilities", "batch", "guide"];
 
+/// Implemented commands this machine can't run right now; none here.
+pub fn unavailable() -> &'static [&'static str] {
+    &[]
+}
+
 pub const NOT_IMPLEMENTED: &[&str] = &[
     "mouse", "keyboard", "window", "workspace", "clipboard", "monitor", "open", "launch",
     "system", "media", "notify", "screenshot", "element", "volume", "audio", "brightness",
-    "wait", "ocr", "setup",
+    "wait", "ocr", "setup", "menu",
 ];
 
 pub const GUIDE: &str = "ON THIS SYSTEM\n- guictl does not support this operating system. Every command that touches\n  the desktop fails with exit code 10.\n";
@@ -96,6 +101,7 @@ pub mod window {
         _active_flag: bool,
         _title: Option<&str>,
         _app: Option<&str>,
+        _pid: Option<u32>,
     ) -> Result<WindowHandle, CmdError> {
         unsupported("window")
     }
@@ -115,6 +121,9 @@ pub mod window {
         unsupported("window")
     }
     pub fn close(_handle: WindowHandle) -> Result<(), CmdError> {
+        unsupported("window")
+    }
+    pub fn kill(_handle: WindowHandle) -> Result<u32, CmdError> {
         unsupported("window")
     }
     pub fn pin(_handle: WindowHandle, _on: bool) -> Result<(), CmdError> {
@@ -153,6 +162,8 @@ pub mod element {
     #[derive(Serialize)]
     pub struct ElementInfo {
         pub id: String,
+        pub value: Option<String>,
+        pub disabled: bool,
     }
 
     pub fn list(_window: WindowHandle, _role: Option<&str>) -> Result<Vec<ElementInfo>, CmdError> {
@@ -165,10 +176,35 @@ pub mod element {
     ) -> Result<ElementInfo, CmdError> {
         unsupported("element")
     }
+    pub fn find_all(
+        _window: WindowHandle,
+        _name: Option<&str>,
+        _role: Option<&str>,
+    ) -> Result<Vec<ElementInfo>, CmdError> {
+        unsupported("element")
+    }
+    pub fn rect(_id: &str) -> Result<(i32, i32, i32, i32), CmdError> {
+        unsupported("element")
+    }
+    pub fn at(_x: i32, _y: i32) -> Result<ElementInfo, CmdError> {
+        unsupported("element")
+    }
     pub fn click(_id: &str) -> Result<(), CmdError> {
         unsupported("element")
     }
     pub fn invoke(_id: &str) -> Result<(), CmdError> {
+        unsupported("element")
+    }
+    pub fn check(_id: &str, _on: bool) -> Result<(), CmdError> {
+        unsupported("element")
+    }
+    pub fn select(_id: &str, _item: Option<&str>) -> Result<(), CmdError> {
+        unsupported("element")
+    }
+    pub fn expand(_id: &str, _open: bool) -> Result<(), CmdError> {
+        unsupported("element")
+    }
+    pub fn set_value(_id: &str, _value: f64) -> Result<f64, CmdError> {
         unsupported("element")
     }
     pub fn text_get(_id: &str) -> Result<String, CmdError> {
@@ -225,7 +261,7 @@ pub mod screenshot {
         _scale: Option<f32>,
         _cursor: bool,
         _grid: bool,
-    ) -> Result<(u32, u32, Vec<u8>), CmdError> {
+    ) -> Result<(u32, u32, Vec<u8>, Option<(i32, i32)>), CmdError> {
         unsupported("screenshot")
     }
 }
@@ -240,7 +276,19 @@ pub mod ocr {
         pub text: String,
     }
 
-    pub fn find(_needle: &str, _monitor: Option<&str>, _window: Option<&str>) -> Result<OcrMatch, CmdError> {
+    pub fn find(
+        _needle: &str,
+        _monitor: Option<&str>,
+        _window: Option<&str>,
+        _region: Option<&str>,
+    ) -> Result<OcrMatch, CmdError> {
+        unsupported("ocr")
+    }
+    pub fn read(
+        _monitor: Option<&str>,
+        _window: Option<&str>,
+        _region: Option<&str>,
+    ) -> Result<Vec<OcrMatch>, CmdError> {
         unsupported("ocr")
     }
 }
@@ -345,6 +393,9 @@ pub mod system {
     use super::unsupported;
     use crate::output::CmdError;
 
+    pub fn spawn(_program: &str, _args: &[String]) -> Result<u32, CmdError> {
+        unsupported("launch")
+    }
     pub fn open(_target: &str) -> Result<(), CmdError> {
         unsupported("open")
     }
@@ -352,6 +403,9 @@ pub mod system {
         unsupported("system")
     }
     pub fn sleep() -> Result<(), CmdError> {
+        unsupported("system")
+    }
+    pub fn status() -> Result<(bool, Option<u64>), CmdError> {
         unsupported("system")
     }
     pub fn keep_awake_for(_duration_ms: u64) -> Result<(), CmdError> {
@@ -365,5 +419,32 @@ pub mod setup {
 
     pub fn run() -> Result<serde_json::Value, CmdError> {
         unsupported("setup")
+    }
+}
+
+pub mod menu {
+    use super::unsupported;
+    use super::window::WindowHandle;
+    use crate::output::CmdError;
+
+    pub fn select(_window: WindowHandle, _path: &[&str]) -> Result<(), CmdError> {
+        unsupported("menu")
+    }
+}
+
+pub mod input {
+    use super::unsupported;
+    use crate::output::CmdError;
+
+    pub struct Watch;
+
+    impl Watch {
+        pub fn take(&self) -> bool {
+            false
+        }
+    }
+
+    pub fn watch() -> Result<Watch, CmdError> {
+        unsupported("--stop-on-user-input")
     }
 }

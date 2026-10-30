@@ -13,6 +13,7 @@ pub fn position() -> Result<(i32, i32), CmdError> {
 /// motion needs neither, so this moves by the distance left to go and checks
 /// where the cursor ended up, repeating if something scaled the motion.
 pub fn move_to(x: i32, y: i32) -> Result<(), CmdError> {
+    super::system::check_unlocked()?;
     let session = portal::session()?;
     let mut last = None;
     for _ in 0..6 {
@@ -37,6 +38,7 @@ fn button_code(button: MouseButton) -> i32 {
 }
 
 pub fn press(button: MouseButton) -> Result<(), CmdError> {
+    super::system::check_unlocked()?;
     portal::session()?.pointer_button(button_code(button), true)
 }
 
@@ -56,6 +58,7 @@ pub fn click(button: MouseButton, double: bool, at: Option<(i32, i32)>) -> Resul
 }
 
 pub fn scroll(amount: i32, direction: ScrollDirection) -> Result<(), CmdError> {
+    super::system::check_unlocked()?;
     let (axis, steps) = match direction {
         ScrollDirection::Up => (0, -amount),
         ScrollDirection::Down => (0, amount),

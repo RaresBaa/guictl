@@ -85,12 +85,29 @@ fn best_run<'a>(words: &'a [Word], needle: &str) -> Option<&'a [Word]> {
     best
 }
 
-/// Finds `needle` on screen with Tesseract and returns its bounding box in
-/// absolute desktop pixels: the union of the shortest run of consecutive
-/// words on one line whose text contains `needle`.
-pub fn find(needle: &str, monitor: Option<&str>, window: Option<&str>) -> Result<OcrMatch, CmdError> {
+/// The union of a run of words, in absolute desktop pixels.
+fn matched(run: &[Word], origin: (i32, i32)) -> OcrMatch {
+    let left = run.iter().map(|w| w.x).min().unwrap_or(0);
+    let top = run.iter().map(|w| w.y).min().unwrap_or(0);
+    let right = run.iter().map(|w| w.x + w.w).max().unwrap_or(0);
+    let bottom = run.iter().map(|w| w.y + w.h).max().unwrap_or(0);
+    OcrMatch {
+        text: run.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
+        x: origin.0 + left,
+        y: origin.1 + top,
+        w: right - left,
+        h: bottom - top,
+    }
+}
+
+/// Reads the words in an area with Tesseract, plus the area's origin.
+fn recognize(
+    monitor: Option<&str>,
+    window: Option<&str>,
+    region: Option<&str>,
+) -> Result<(Vec<Word>, (i32, i32)), CmdError> {
     let lang = language()?;
-    let (img, origin_x, origin_y) = capture_raw(monitor, window)?;
+    let (img, origin_x, origin_y) = capture_raw(monitor, window, region)?;
 
     let path = std::env::temp_dir().join(format!("guictl-ocr-{}.png", std::process::id()));
     img.save(&path).map_err(|e| CmdError::os(format!("could not write the OCR input image: {e}")))?;
@@ -104,20 +121,29 @@ pub fn find(needle: &str, monitor: Option<&str>, window: Option<&str>) -> Result
         )));
     }
 
-    let words = parse_words(&String::from_utf8_lossy(&output.stdout));
+    Ok((parse_words(&String::from_utf8_lossy(&output.stdout)), (origin_x, origin_y)))
+}
+
+/// Finds `needle` on screen and returns its bounding box in absolute desktop
+/// pixels: the union of the shortest run of consecutive words on one line
+/// whose text contains `needle`.
+pub fn find(
+    needle: &str,
+    monitor: Option<&str>,
+    window: Option<&str>,
+    region: Option<&str>,
+) -> Result<OcrMatch, CmdError> {
+    let (words, origin) = recognize(monitor, window, region)?;
     let run = best_run(&words, needle)
         .ok_or_else(|| CmdError::not_found(format!("no text matching '{needle}' found on screen")))?;
-    let left = run.iter().map(|w| w.x).min().unwrap_or(0);
-    let top = run.iter().map(|w| w.y).min().unwrap_or(0);
-    let right = run.iter().map(|w| w.x + w.w).max().unwrap_or(0);
-    let bottom = run.iter().map(|w| w.y + w.h).max().unwrap_or(0);
-    Ok(OcrMatch {
-        text: run.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
-        x: origin_x + left,
-        y: origin_y + top,
-        w: right - left,
-        h: bottom - top,
-    })
+    Ok(matched(run, origin))
+}
+
+/// Every line of text in the area, with its bounding box in absolute desktop
+/// pixels.
+pub fn read(monitor: Option<&str>, window: Option<&str>, region: Option<&str>) -> Result<Vec<OcrMatch>, CmdError> {
+    let (words, origin) = recognize(monitor, window, region)?;
+    Ok(words.chunk_by(|a, b| a.line == b.line).map(|line| matched(line, origin)).collect())
 }
 
 #[cfg(test)]
@@ -150,6 +176,17 @@ mod tests {
         let run = best_run(&words, "COPY").unwrap();
         assert_eq!(run.len(), 1);
         assert_eq!(run[0].x, 100);
+    }
+
+    #[test]
+    fn lines_are_the_union_of_their_words() {
+        let words = parse_words(TSV);
+        let lines: Vec<OcrMatch> =
+            words.chunk_by(|a, b| a.line == b.line).map(|line| matched(line, (1000, 0))).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "Save As Copy");
+        assert_eq!((lines[0].x, lines[0].y, lines[0].w, lines[0].h), (1010, 10, 140, 20));
+        assert_eq!(lines[1].text, "Save");
     }
 
     #[test]

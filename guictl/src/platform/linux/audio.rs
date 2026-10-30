@@ -1,3 +1,4 @@
+use super::window::unwrapped_name;
 use crate::output::CmdError;
 use serde::Serialize;
 use serde_json::Value;
@@ -64,7 +65,7 @@ fn app_streams(app: &str) -> Result<Vec<Value>, CmdError> {
         .filter(|s| {
             ["application.process.binary", "application.name"]
                 .iter()
-                .any(|key| s["properties"][*key].as_str().is_some_and(|v| v.eq_ignore_ascii_case(app)))
+                .any(|key| s["properties"][*key].as_str().is_some_and(|v| unwrapped_name(v).eq_ignore_ascii_case(unwrapped_name(app))))
         })
         .collect();
     if streams.is_empty() {

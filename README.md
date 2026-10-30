@@ -10,15 +10,24 @@ under [Not implemented and known gaps](#not-implemented-and-known-gaps).
 ## What it can do
 
 - **See the screen:** take a screenshot of the desktop, a monitor, a window or
-  a region, optionally with a coordinate grid; find text on screen with OCR.
+  a region, optionally with a coordinate grid; find or read text on screen with
+  OCR.
 - **Mouse and keyboard:** move, click, drag and scroll; type text, press keys
   and key combinations.
 - **Windows:** list, focus, move, resize, minimize, maximize, close, keep on
-  top, and send to another monitor or virtual desktop.
+  top, and send to another monitor or virtual desktop; see that one has frozen
+  and end its process.
 - **UI elements:** list a window's buttons, fields and menu items through the
-  accessibility tree, then click or activate them and read or set their text.
-- **Waiting:** wait for a window or an element to appear, or for the screen to
-  stop changing.
+  accessibility tree, with field values and check states, then click or
+  activate them, read or set their text, set check boxes, dropdowns, tree
+  nodes and sliders; pick an item from nested menus by its path, e.g.
+  `"View>Zoom>Zoom In"`.
+- **Dialogs and popups:** see which window a dialog belongs to and which
+  windows a dialog is blocking; `launch` reports every window a program opens
+  at start (splash screens, tips, licence prompts), not just the first.
+- **Waiting:** wait for a window, a window an action just opened, or an element
+  to appear or go away, for an element to become enabled or show a value, or
+  for the screen to change or stop changing.
 - **Clipboard:** read and write text and images.
 - **Apps and files:** launch an application; open a file or URL with its
   default handler.
@@ -28,8 +37,12 @@ under [Not implemented and known gaps](#not-implemented-and-known-gaps).
   and pick the default; play, pause, skip and read what is playing.
 - **Virtual desktops:** list them and switch between them.
 - **System:** lock the screen, sleep, keep the computer awake, show a
-  notification.
-- **Batches:** run several commands in one call from a JSON file or stdin.
+  notification, see whether the screen is locked.
+- **Batches:** run several commands in one call from a JSON file or stdin, or
+  keep one process running and feed it commands line by line; optionally stop
+  as soon as a person touches the mouse or keyboard.
+- **Administrator windows (Windows):** add `--elevate` to run a command as
+  administrator, after the person answers the prompt.
 
 Not all of it works on both platforms yet; see
 [Not implemented and known gaps](#not-implemented-and-known-gaps).
@@ -48,6 +61,21 @@ With Nix, `nix build` gives `result/bin/guictl`, and `nix run github:RaresBaa/gu
 runs it without a checkout. That build brings its own `tesseract` (English),
 `wl-clipboard` and `pactl`. Its path changes with every update, so run
 `guictl setup` again after one.
+
+On NixOS, use the flake's module instead of installing the package alone:
+
+```nix
+# inputs.guictl.url = "github:RaresBaa/guictl";
+imports = [ inputs.guictl.nixosModules.default ];
+```
+
+It installs guictl and sets `services.gnome.at-spi2-core.enable = true`, which
+`element` and `menu` need and NixOS leaves off under Plasma. Log in again after
+rebuilding, and restart any app that is still missing from `element list`.
+
+To add a user to the `input` group for `batch --stop-on-user-input`, set
+`programs.guictl.inputUsers = [ "alice" ];`. Read
+[what that allows](#stopping-when-someone-uses-the-computer) first.
 
 On Arch, `makepkg -si` in [packaging/arch/](packaging/arch/) builds and installs a
 package with the run-time tools as dependencies. It fetches the source from
@@ -82,7 +110,8 @@ commands go through KWin and Plasma services that don't exist elsewhere.
 ### Runtime dependencies
 
 A normal Plasma install already has everything except OCR and clipboard
-images. Package names are Arch's.
+images. NixOS also lacks the accessibility service; see
+[Building](#building) for its module. Package names are Arch's.
 
 On Arch, the two things to add are:
 
@@ -101,9 +130,10 @@ Run this once after installing:
 guictl setup
 ```
 
-It takes care of the two permissions Plasma asks for. Both are checks made by
-Plasma, and guictl doesn't try to get around either: you grant them by running
-this command and by accepting the dialog.
+It takes care of the two permissions Plasma asks for and switches off one
+notification. Both permissions are checks made by Plasma, and guictl doesn't
+try to get around either: you grant them by running this command and by
+accepting the dialog.
 
 **Screenshots** (`screenshot`, `ocr`, `wait idle`). KWin only gives screenshots
 to executables that declare the screenshot interface in a `.desktop` file, so
@@ -111,40 +141,57 @@ to executables that declare the screenshot interface in a `.desktop` file, so
 guictl binary and refreshes Plasma's application cache.
 
 **Mouse and keyboard input** (`mouse`, `keyboard`). `setup` makes Plasma show a
-"Remote control" dialog asking whether to let guictl control input. Accept it
-once; guictl stores the permission token in
-`~/.local/state/guictl/remote-desktop-token`.
+"Remote control" dialog asking whether to allow input control. The dialog names
+the program guictl was started from, such as your terminal or the agent's host,
+not guictl itself, because Plasma identifies the caller by the application it
+was launched from. Accept it once; guictl stores the permission token in
+`~/.local/state/guictl/remote-desktop-token`. Starting guictl from a different
+program may bring the dialog back.
+
+**The "Remote Control Started" popup.** Every `mouse` or `keyboard` command is
+its own remote-control session, and Plasma announces each new session with a
+popup, so an agent at work piles them up. A popup doesn't go away while the
+pointer is over it. `setup` turns this popup off: it is the same as unticking
+"Show a message in a popup" for "Started Remote Desktop" under System Settings >
+Notifications > Applications > KDE Portal Integration > Configure Events, and
+that is where to turn it back on. It is one Plasma setting, so the popup goes
+away for every program that takes remote control, not just guictl. The consent
+dialog above is not affected.
+
+### Stopping when someone uses the computer
+
+`batch --stop-on-user-input` is optional and needs one more permission, which
+`setup` can't give because it takes root:
+
+```
+sudo usermod -aG input $USER
+```
+
+Then log in again. Without it, the flag fails with an error that says this, and
+everything else works as usual.
+
+**Being in the `input` group lets every program you run read everything you
+type, passwords included,** so join only if you want this flag. guictl itself
+only notes that a key was pressed or the pointer moved, not which key, and
+doesn't stop the input reaching your apps. Its own mouse and keyboard input
+doesn't reach these devices, so it doesn't stop itself.
 
 ## Not implemented and known gaps
 
 `guictl capabilities` reports what is and isn't implemented on the machine it
-runs on. Commands that aren't implemented fail with an `unsupported` error
-(exit code 10).
+runs on, and under `unavailable` what is implemented but can't run there, such
+as `element` without an accessibility bus. Commands that aren't implemented
+fail with an `unsupported` error (exit code 10).
 
 | Platform | Area | Gap |
 |---|---|---|
-| Both | User takeover | While an agent drives the desktop, show an on-screen indicator and stop as soon as the user does anything. |
+| Both | User takeover | No on-screen indicator while an agent drives the desktop. Stopping when the user does something only works inside a `batch` with `--stop-on-user-input`. |
 | Windows | `workspace`, `window send --workspace` | **Not implemented.** |
 | Windows | `monitor set --enabled` | **Not implemented.** |
 | Windows | `monitor power` | **Not implemented.** |
-| Windows | Programs running as administrator | A guictl that isn't itself elevated can't act on their windows, and Windows blocks it silently, so commands such as `window state restore` still return `ok`. |
-| Windows | `brightness` | Works over DDC/CI only. |
-| Windows | `audio device set-default` / `enable` / `disable` | Use the undocumented `IPolicyConfig` interface (CLSID `CPolicyConfigClient`, IID `f8679f50-850a-41cf-9c72-430f290290c8`). |
-| Linux | Desktops | Only KDE Plasma 6 in a Wayland session. The X11 session and other desktops are not supported. |
-| Linux | `keyboard hold`, `mouse press` | A key or button can't stay held between separate commands. Put the hold and the matching release in one `batch`. |
-| Linux | `keyboard type` | Relies on KWin to turn each character into key presses; a character the current keyboard layout can't produce fails with an error. |
-| Linux | `window move` / `resize` / `state` | Return before the window has its new geometry, so reading it back at once can show the old values. |
-| Linux | `monitor set --position` | Can't be negative: KScreen keeps the desktop's top-left corner at 0,0. |
 | Linux | `monitor power` | Works only while a single monitor is attached: `kscreen-doctor --dpms` switches every monitor. |
-| Linux | `audio device enable` / `disable` | Switch the sound card's profile, since PulseAudio has no per-device switch. Disabling a device disables every input and output on its card. |
-| Linux | `element` | Switches on the session's accessibility support the first time it is used, and it stays on until logout. Apps built on Chromium or Electron (VS Code, Chrome) expose nothing unless started with `--force-renderer-accessibility`. |
-| Linux | `element` rectangles | Correct for elements in the window itself, but not for those in an open popup menu, which is a separate surface. |
-| Linux | `element click` | Refuses elements that aren't drawn (items of closed menus, scrolled-away rows; they have `"showing": false`), since it would hit whatever is drawn there. `element invoke` works on them. |
-| Linux | `element text set` | Some fields report success and change nothing (Firefox address bar). guictl reads the text back and, if it didn't take, focuses the field and types instead. |
-| Linux | `clipboard set --image` | `wl-copy` leaves a small process behind that serves the image until something else is copied. |
-| Both | `element click` | Doesn't bring the window to the front first; run `window focus` before it. |
-| Both | `window close` | Only asks the window to close. If the app shows a "save changes?" dialog instead, the result has `"closed": false` and lists the dialog under `new_windows`. |
-| Both | `wait idle` | Never settles while anything in view animates, even a small spinner; narrow it with `--region`, `--window` or `--monitor`. It takes three identical captures 300 ms apart, so an animation slower than that can slip through. |
+| Linux | `audio device enable` / `disable` | Switch the sound card's profile, since `pactl`, which guictl uses to talk to PipeWire, has no per-device switch. Disabling a device disables every input and output on its card. |
+| Both | Rust edition | **Not implemented:** moving from edition 2021 to 2024. Best done on its own, after the Linux testing, with `cargo fix --edition`. It changes when some temporaries are dropped, so it needs retesting. |
 
 ## License
 

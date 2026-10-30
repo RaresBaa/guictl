@@ -18,7 +18,7 @@ impl CmdError {
         Self { exit_code: 3, code: "not_found", message: message.into() }
     }
 
-    #[allow(dead_code)] // only the Linux backend raises it so far
+    #[allow(dead_code)] // the fallback for unsupported systems never raises it
     pub fn permission_denied(message: impl Into<String>) -> Self {
         Self { exit_code: 4, code: "permission_denied", message: message.into() }
     }
@@ -29,6 +29,10 @@ impl CmdError {
 
     pub fn timeout(message: impl Into<String>) -> Self {
         Self { exit_code: 5, code: "timeout", message: message.into() }
+    }
+
+    pub fn interrupted(message: impl Into<String>) -> Self {
+        Self { exit_code: 6, code: "interrupted", message: message.into() }
     }
 
     pub fn os(message: impl Into<String>) -> Self {
@@ -78,6 +82,7 @@ mod tests {
             (CmdError::not_found("x"), 3, "not_found"),
             (CmdError::permission_denied("x"), 4, "permission_denied"),
             (CmdError::timeout("x"), 5, "timeout"),
+            (CmdError::interrupted("x"), 6, "interrupted"),
             (CmdError::unsupported("x"), 10, "unsupported"),
         ];
         for (err, exit_code, code) in all {

@@ -187,15 +187,18 @@ unsafe fn capture(rect: &CaptureRect, cursor: bool, grid: bool) -> Result<RgbaIm
 pub(crate) fn capture_raw(
     monitor: Option<&str>,
     window: Option<&str>,
+    region: Option<&str>,
 ) -> Result<(RgbaImage, i32, i32), CmdError> {
-    if monitor.is_some() && window.is_some() {
-        return Err(CmdError::invalid_args("specify at most one of --monitor, --window"));
+    if [monitor.is_some(), window.is_some(), region.is_some()].iter().filter(|&&b| b).count() > 1 {
+        return Err(CmdError::invalid_args("specify at most one of --monitor, --window, --region"));
     }
 
     let rect = if let Some(id) = window {
         window_capture_rect(id)?
     } else if let Some(id) = monitor {
         monitor_capture_rect(id)?
+    } else if let Some(spec) = region {
+        parse_region(spec)?
     } else {
         virtual_screen_rect()
     };
@@ -215,7 +218,7 @@ pub fn take(
     scale: Option<f32>,
     cursor: bool,
     grid: bool,
-) -> Result<(u32, u32, Vec<u8>), CmdError> {
+) -> Result<(u32, u32, Vec<u8>, Option<(i32, i32)>), CmdError> {
     let specified = [monitor.is_some(), window.is_some(), region.is_some()]
         .iter()
         .filter(|&&b| b)
@@ -255,5 +258,5 @@ pub fn take(
     let mut bytes: Vec<u8> = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
         .map_err(|e| CmdError::os(e.to_string()))?;
-    Ok((width, height, bytes))
+    Ok((width, height, bytes, None))
 }

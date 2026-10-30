@@ -49,6 +49,36 @@ fn key_code(name: &str) -> Result<Key, CmdError> {
         "f10" => 68,
         "f11" => 87,
         "f12" => 88,
+        "capslock" => 58,
+        "numlock" => 69,
+        "scrolllock" => 70,
+        "printscreen" => 99,
+        "pause" => 119,
+        "menu" => 127,
+        "numpad0" => 82,
+        "numpad1" => 79,
+        "numpad2" => 80,
+        "numpad3" => 81,
+        "numpad4" => 75,
+        "numpad5" => 76,
+        "numpad6" => 77,
+        "numpad7" => 71,
+        "numpad8" => 72,
+        "numpad9" => 73,
+        "numpadadd" => 78,
+        "numpadsubtract" => 74,
+        "numpadmultiply" => 55,
+        "numpaddivide" => 98,
+        "numpaddecimal" => 83,
+        "playpause" => 164,
+        "nexttrack" => 163,
+        "prevtrack" => 165,
+        "stop" => 166,
+        "volumeup" => 115,
+        "volumedown" => 114,
+        "mute" => 113,
+        // `+` joins the keys of a combination, so it has a name of its own.
+        "plus" => return Ok(Key::Sym(keysym('+'))),
         _ => {
             let mut chars = lower.chars();
             return match (chars.next(), chars.next()) {
@@ -73,9 +103,10 @@ fn tap(key: Key) -> Result<(), CmdError> {
     send(key, false)
 }
 
-/// Types by keysym, so each character has to exist somewhere in the current
-/// keyboard layout - KWin presses whichever key (and Shift level) produces it.
+/// Types by keysym: KWin presses whichever key (and Shift level) produces
+/// each character, and lends a spare key to one the layout doesn't have.
 pub fn type_text(text: &str) -> Result<(), CmdError> {
+    super::system::check_unlocked()?;
     for c in text.chars() {
         let key = match c {
             '\n' => Key::Code(28),
@@ -83,7 +114,7 @@ pub fn type_text(text: &str) -> Result<(), CmdError> {
             c => Key::Sym(keysym(c)),
         };
         tap(key).map_err(|e| {
-            CmdError::os(format!("could not type {c:?} (is it on the current keyboard layout?): {}", e.message))
+            CmdError::os(format!("could not type {c:?}: {}", e.message))
         })?;
     }
     Ok(())
@@ -91,6 +122,7 @@ pub fn type_text(text: &str) -> Result<(), CmdError> {
 
 pub fn key(name: &str, repeat: u32) -> Result<(), CmdError> {
     let key = key_code(name)?;
+    super::system::check_unlocked()?;
     for _ in 0..repeat.max(1) {
         tap(key)?;
     }
@@ -99,6 +131,7 @@ pub fn key(name: &str, repeat: u32) -> Result<(), CmdError> {
 
 pub fn hotkey(combo: &str) -> Result<(), CmdError> {
     let keys: Vec<Key> = combo.split('+').map(key_code).collect::<Result<_, _>>()?;
+    super::system::check_unlocked()?;
     for &key in &keys {
         send(key, true)?;
     }
@@ -109,7 +142,9 @@ pub fn hotkey(combo: &str) -> Result<(), CmdError> {
 }
 
 pub fn hold(name: &str) -> Result<(), CmdError> {
-    send(key_code(name)?, true)
+    let key = key_code(name)?;
+    super::system::check_unlocked()?;
+    send(key, true)
 }
 
 pub fn release(name: &str) -> Result<(), CmdError> {

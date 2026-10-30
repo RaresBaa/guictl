@@ -13,6 +13,36 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
+      # A package can't register a session bus service or change the session's
+      # environment, and `element` and `menu` need both: NixOS leaves AT-SPI
+      # off under Plasma and sets NO_AT_BRIDGE and GTK_A11Y=none while it is.
+      nixosModules.default =
+        {
+          config,
+          lib,
+          pkgs,
+          ...
+        }:
+        {
+          options.programs.guictl.inputUsers = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ ];
+            example = [ "alice" ];
+            description = ''
+              Users to add to the `input` group, which
+              `guictl batch --stop-on-user-input` needs. Every program these
+              users run can then read what they type, so nobody is added
+              unless listed here.
+            '';
+          };
+
+          config = {
+            environment.systemPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.default ];
+            services.gnome.at-spi2-core.enable = true;
+            users.groups.input.members = config.programs.guictl.inputUsers;
+          };
+        };
+
       packages = forAllSystems (
         system:
         let

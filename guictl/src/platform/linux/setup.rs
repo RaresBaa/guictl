@@ -1,7 +1,8 @@
 //! `guictl setup`: the two one-time permissions Plasma asks for, done in
-//! one go so nobody has to write a .desktop file by hand.
+//! one go so nobody has to write a .desktop file by hand, and the
+//! "Remote Control Started" popup switched off.
 
-use super::{portal, screenshot};
+use super::{dbus, portal, screenshot};
 use crate::output::CmdError;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -63,8 +64,33 @@ fn authorize_screenshots() -> Result<PathBuf, CmdError> {
     }
 }
 
+/// Every guictl input command is its own portal session, and the KDE portal
+/// announces each new session with a popup, so an agent at work stacks them
+/// up. This switches that event's popup off in the portal's notification
+/// settings, which is what unticking it in System Settings does. It is one
+/// setting for the portal, so it applies to every program, not just guictl.
+fn silence_remote_control_popup() -> Result<(), CmdError> {
+    const APP: &str = "xdg-desktop-portal-kde";
+    let written = Command::new("kwriteconfig6")
+        .args(["--file", &format!("{APP}.notifyrc"), "--group", "Event/remotedesktopstarted", "--key", "Action", ""])
+        .output()
+        .map_err(|e| CmdError::unsupported(format!("could not run kwriteconfig6: {e}")))?;
+    if !written.status.success() {
+        return Err(CmdError::os(format!(
+            "kwriteconfig6 failed: {}",
+            String::from_utf8_lossy(&written.stderr).trim()
+        )));
+    }
+    // The running portal reads the file only at start; System Settings sends
+    // this signal to make it read it again.
+    dbus::session()?
+        .emit_signal(None::<&str>, "/Config", "org.kde.knotification", "reparseConfiguration", &(APP,))
+        .map_err(dbus::err)
+}
+
 pub fn run() -> Result<Value, CmdError> {
     let desktop_file = authorize_screenshots()?;
+    silence_remote_control_popup()?;
     // Starting an input session is what makes Plasma show its consent
     // dialog; with a stored token it just succeeds.
     portal::session()?;
@@ -72,6 +98,8 @@ pub fn run() -> Result<Value, CmdError> {
         "ok": true,
         "screenshot": "authorized",
         "input": "authorized",
+        "remote_control_popup": "off",
+        "note": "Plasma's \"Remote Control Started\" popup is now off for every program, not just guictl. Turn it back on in System Settings > Notifications > Applications > KDE Portal Integration > Configure Events.",
         "desktop_file": desktop_file,
     }))
 }
