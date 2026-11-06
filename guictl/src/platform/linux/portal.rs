@@ -109,10 +109,10 @@ fn start() -> Result<Session, CmdError> {
     std::thread::spawn(move || {
         for message in signals.flatten() {
             let path = message.header().path().map(|p| p.to_string()).unwrap_or_default();
-            if let Ok((code, results)) = message.body().deserialize::<(u32, Results)>() {
-                if tx.send((path, code, results)).is_err() {
-                    break;
-                }
+            if let Ok((code, results)) = message.body().deserialize::<(u32, Results)>()
+                && tx.send((path, code, results)).is_err()
+            {
+                break;
             }
         }
     });

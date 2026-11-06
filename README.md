@@ -186,12 +186,8 @@ fail with an `unsupported` error (exit code 10).
 | Platform | Area | Gap |
 |---|---|---|
 | Both | User takeover | No on-screen indicator while an agent drives the desktop. Stopping when the user does something only works inside a `batch` with `--stop-on-user-input`. |
-| Windows | `workspace`, `window send --workspace` | **Not implemented.** |
-| Windows | `monitor set --enabled` | **Not implemented.** |
-| Windows | `monitor power` | **Not implemented.** |
+| Windows | `workspace`, `window send --workspace` | Windows 10 only. They go through Explorer's undocumented interfaces, which change between builds, and Windows 11 isn't supported yet. |
 | Linux | `monitor power` | Works only while a single monitor is attached: `kscreen-doctor --dpms` switches every monitor. |
-| Linux | `audio device enable` / `disable` | Switch the sound card's profile, since `pactl`, which guictl uses to talk to PipeWire, has no per-device switch. Disabling a device disables every input and output on its card. |
-| Both | Rust edition | **Not implemented:** moving from edition 2021 to 2024. Best done on its own, after the Linux testing, with `cargo fix --edition`. It changes when some temporaries are dropped, so it needs retesting. |
 
 ## License
 

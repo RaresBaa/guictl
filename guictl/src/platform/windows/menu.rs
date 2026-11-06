@@ -51,47 +51,53 @@ unsafe fn find_item(
     container: &IUIAutomationElement,
     wanted: &str,
 ) -> Option<IUIAutomationElement> {
-    let condition = automation
-        .CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_MenuItemControlTypeId.0))
-        .ok()?;
-    let items = container.FindAll(TreeScope_Descendants, &condition).ok()?;
-    let mut prefix_match = None;
-    for i in 0..items.Length().unwrap_or(0) {
-        let Ok(item) = items.GetElement(i) else { continue };
-        let name = normalize(&item.CurrentName().map(|b| b.to_string()).unwrap_or_default());
-        if name == wanted {
-            return Some(item);
+    unsafe {
+        let condition = automation
+            .CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_MenuItemControlTypeId.0))
+            .ok()?;
+        let items = container.FindAll(TreeScope_Descendants, &condition).ok()?;
+        let mut prefix_match = None;
+        for i in 0..items.Length().unwrap_or(0) {
+            let Ok(item) = items.GetElement(i) else { continue };
+            let name = normalize(&item.CurrentName().map(|b| b.to_string()).unwrap_or_default());
+            if name == wanted {
+                return Some(item);
+            }
+            if prefix_match.is_none() && !wanted.is_empty() && name.starts_with(wanted) {
+                prefix_match = Some(item);
+            }
         }
-        if prefix_match.is_none() && !wanted.is_empty() && name.starts_with(wanted) {
-            prefix_match = Some(item);
-        }
+        prefix_match
     }
-    prefix_match
 }
 
 unsafe fn click_center(item: &IUIAutomationElement) -> Result<(), CmdError> {
-    let r = item.CurrentBoundingRectangle().map_err(|e| CmdError::os(e.to_string()))?;
-    super::mouse::click(MouseButton::Left, false, Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2)))
+    unsafe {
+        let r = item.CurrentBoundingRectangle().map_err(|e| CmdError::os(e.to_string()))?;
+        super::mouse::click(MouseButton::Left, false, Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2)))
+    }
 }
 
 /// Opens a submenu: Expand where the app supports it, else a click, which
 /// opens a submenu in every toolkit.
 unsafe fn open(item: &IUIAutomationElement) -> Result<(), CmdError> {
-    if let Ok(pattern) = item.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId) {
-        if pattern.Expand().is_ok() {
-            return Ok(());
-        }
+    unsafe {
+        if let Ok(pattern) = item.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId)
+            && pattern.Expand().is_ok() {
+                return Ok(());
+            }
+        click_center(item)
     }
-    click_center(item)
 }
 
 unsafe fn activate(item: &IUIAutomationElement) -> Result<(), CmdError> {
-    if let Ok(pattern) = item.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) {
-        if pattern.Invoke().is_ok() {
-            return Ok(());
-        }
+    unsafe {
+        if let Ok(pattern) = item.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+            && pattern.Invoke().is_ok() {
+                return Ok(());
+            }
+        click_center(item)
     }
-    click_center(item)
 }
 
 pub fn select(hwnd: HWND, path: &[&str]) -> Result<(), CmdError> {

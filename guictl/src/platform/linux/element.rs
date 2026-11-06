@@ -1391,10 +1391,12 @@ fn set_text(el: &Element, text: &str) -> Result<(), CmdError> {
     // A field may reformat what it's given, and a password field only shows
     // dots, but one still holding the old text didn't take it.
     let hidden = el.bus.role(&el.node) == "password text";
-    if let Ok(before) = before {
-        if !hidden && before != text && !settle(|| read().is_ok_and(|now| now != before)) {
-            return Err(CmdError::os("the field did not change; it may not accept typing"));
-        }
+    if let Ok(before) = before
+        && !hidden
+        && before != text
+        && !settle(|| read().is_ok_and(|now| now != before))
+    {
+        return Err(CmdError::os("the field did not change; it may not accept typing"));
     }
     Ok(())
 }

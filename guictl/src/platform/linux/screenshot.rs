@@ -1,5 +1,6 @@
 use super::{dbus, kwin};
 use crate::output::CmdError;
+use crate::platform::Screenshot;
 use image::{Rgba, RgbaImage};
 use std::collections::HashMap;
 use std::io::Read;
@@ -295,7 +296,7 @@ pub fn take(
     scale: Option<f32>,
     cursor: bool,
     grid: bool,
-) -> Result<(u32, u32, Vec<u8>, Option<(i32, i32)>), CmdError> {
+) -> Result<Screenshot, CmdError> {
     let specified = [monitor.is_some(), window.is_some(), region.is_some()]
         .iter()
         .filter(|&&b| b)

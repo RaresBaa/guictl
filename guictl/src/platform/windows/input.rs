@@ -23,17 +23,21 @@ impl Watch {
 }
 
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && (*(lparam.0 as *const MSLLHOOKSTRUCT)).flags & LLMHF_INJECTED == 0 {
-        SEEN.store(true, Ordering::SeqCst);
+    unsafe {
+        if code >= 0 && (*(lparam.0 as *const MSLLHOOKSTRUCT)).flags & LLMHF_INJECTED == 0 {
+            SEEN.store(true, Ordering::SeqCst);
+        }
+        CallNextHookEx(None, code, wparam, lparam)
     }
-    CallNextHookEx(None, code, wparam, lparam)
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && (*(lparam.0 as *const KBDLLHOOKSTRUCT)).flags.0 & LLKHF_INJECTED.0 == 0 {
-        SEEN.store(true, Ordering::SeqCst);
+    unsafe {
+        if code >= 0 && (*(lparam.0 as *const KBDLLHOOKSTRUCT)).flags.0 & LLKHF_INJECTED.0 == 0 {
+            SEEN.store(true, Ordering::SeqCst);
+        }
+        CallNextHookEx(None, code, wparam, lparam)
     }
-    CallNextHookEx(None, code, wparam, lparam)
 }
 
 /// Starts watching. The hooks run on a thread of their own that pumps

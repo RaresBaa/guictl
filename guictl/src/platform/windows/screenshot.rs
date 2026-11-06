@@ -1,4 +1,5 @@
 use crate::output::CmdError;
+use crate::platform::Screenshot;
 use image::RgbaImage;
 use windows::Win32::Foundation::{COLORREF, HWND};
 use windows::Win32::Graphics::Gdi::{
@@ -54,22 +55,24 @@ fn parse_region(spec: &str) -> Result<CaptureRect, CmdError> {
 }
 
 unsafe fn draw_cursor(hdc: windows::Win32::Graphics::Gdi::HDC, origin_x: i32, origin_y: i32) {
-    let mut info = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
-    if GetCursorInfo(&mut info).is_err() || info.flags != CURSOR_SHOWING {
-        return;
-    }
-    let mut icon_info = ICONINFO::default();
-    if GetIconInfo(info.hCursor, &mut icon_info).is_err() {
-        return;
-    }
-    let x = info.ptScreenPos.x - origin_x - icon_info.xHotspot as i32;
-    let y = info.ptScreenPos.y - origin_y - icon_info.yHotspot as i32;
-    let _ = DrawIconEx(hdc, x, y, info.hCursor, 0, 0, 0, None, DI_NORMAL);
-    if !icon_info.hbmColor.is_invalid() {
-        let _ = DeleteObject(icon_info.hbmColor);
-    }
-    if !icon_info.hbmMask.is_invalid() {
-        let _ = DeleteObject(icon_info.hbmMask);
+    unsafe {
+        let mut info = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
+        if GetCursorInfo(&mut info).is_err() || info.flags != CURSOR_SHOWING {
+            return;
+        }
+        let mut icon_info = ICONINFO::default();
+        if GetIconInfo(info.hCursor, &mut icon_info).is_err() {
+            return;
+        }
+        let x = info.ptScreenPos.x - origin_x - icon_info.xHotspot as i32;
+        let y = info.ptScreenPos.y - origin_y - icon_info.yHotspot as i32;
+        let _ = DrawIconEx(hdc, x, y, info.hCursor, 0, 0, 0, None, DI_NORMAL);
+        if !icon_info.hbmColor.is_invalid() {
+            let _ = DeleteObject(icon_info.hbmColor);
+        }
+        if !icon_info.hbmMask.is_invalid() {
+            let _ = DeleteObject(icon_info.hbmMask);
+        }
     }
 }
 
@@ -77,40 +80,42 @@ unsafe fn draw_cursor(hdc: windows::Win32::Graphics::Gdi::HDC, origin_x: i32, or
 /// coordinate space `mouse move`/`mouse click` expect, so an agent can read
 /// click targets straight off the screenshot.
 unsafe fn draw_grid(hdc: windows::Win32::Graphics::Gdi::HDC, origin_x: i32, origin_y: i32, w: i32, h: i32) {
-    const STEP: i32 = 100;
-    let color = COLORREF(0x0000FF00); // 0x00BBGGRR -> opaque green
-    let pen = CreatePen(PS_SOLID, 1, color);
-    let old_pen = SelectObject(hdc, pen);
-    let _ = SetBkMode(hdc, TRANSPARENT);
-    let _ = SetTextColor(hdc, color);
+    unsafe {
+        const STEP: i32 = 100;
+        let color = COLORREF(0x0000FF00); // 0x00BBGGRR -> opaque green
+        let pen = CreatePen(PS_SOLID, 1, color);
+        let old_pen = SelectObject(hdc, pen);
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let _ = SetTextColor(hdc, color);
 
-    let mut x = STEP;
-    while x < w {
-        let _ = MoveToEx(hdc, x, 0, None);
-        let _ = LineTo(hdc, x, h);
-        x += STEP;
-    }
-    let mut y = STEP;
-    while y < h {
-        let _ = MoveToEx(hdc, 0, y, None);
-        let _ = LineTo(hdc, w, y);
-        y += STEP;
-    }
-
-    let mut gy = 0;
-    while gy < h {
-        let mut gx = 0;
-        while gx < w {
-            let label = format!("{},{}", origin_x + gx, origin_y + gy);
-            let wide: Vec<u16> = label.encode_utf16().collect();
-            let _ = TextOutW(hdc, gx + 2, gy + 2, &wide);
-            gx += STEP;
+        let mut x = STEP;
+        while x < w {
+            let _ = MoveToEx(hdc, x, 0, None);
+            let _ = LineTo(hdc, x, h);
+            x += STEP;
         }
-        gy += STEP;
-    }
+        let mut y = STEP;
+        while y < h {
+            let _ = MoveToEx(hdc, 0, y, None);
+            let _ = LineTo(hdc, w, y);
+            y += STEP;
+        }
 
-    SelectObject(hdc, old_pen);
-    let _ = DeleteObject(pen);
+        let mut gy = 0;
+        while gy < h {
+            let mut gx = 0;
+            while gx < w {
+                let label = format!("{},{}", origin_x + gx, origin_y + gy);
+                let wide: Vec<u16> = label.encode_utf16().collect();
+                let _ = TextOutW(hdc, gx + 2, gy + 2, &wide);
+                gx += STEP;
+            }
+            gy += STEP;
+        }
+
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(pen);
+    }
 }
 
 unsafe fn dib_to_image(
@@ -119,65 +124,69 @@ unsafe fn dib_to_image(
     w: i32,
     h: i32,
 ) -> Result<RgbaImage, CmdError> {
-    let mut bmi = BITMAPINFO::default();
-    bmi.bmiHeader.biSize = std::mem::size_of::<windows::Win32::Graphics::Gdi::BITMAPINFOHEADER>() as u32;
-    bmi.bmiHeader.biWidth = w;
-    bmi.bmiHeader.biHeight = -h; // negative = top-down, matches our row loop below
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB.0;
+    unsafe {
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader.biSize = std::mem::size_of::<windows::Win32::Graphics::Gdi::BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h; // negative = top-down, matches our row loop below
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB.0;
 
-    let mut buffer = vec![0u8; (w as usize) * (h as usize) * 4];
-    let copied = GetDIBits(
-        hdc,
-        bitmap,
-        0,
-        h as u32,
-        Some(buffer.as_mut_ptr() as *mut _),
-        &mut bmi,
-        DIB_RGB_COLORS,
-    );
-    if copied == 0 {
-        return Err(CmdError::os("GetDIBits failed to copy captured pixels"));
-    }
+        let mut buffer = vec![0u8; (w as usize) * (h as usize) * 4];
+        let copied = GetDIBits(
+            hdc,
+            bitmap,
+            0,
+            h as u32,
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+        if copied == 0 {
+            return Err(CmdError::os("GetDIBits failed to copy captured pixels"));
+        }
 
-    let mut img = RgbaImage::new(w as u32, h as u32);
-    for (i, px) in buffer.chunks_exact(4).enumerate() {
-        let x = (i as u32) % w as u32;
-        let y = (i as u32) / w as u32;
-        img.put_pixel(x, y, image::Rgba([px[2], px[1], px[0], 255]));
+        let mut img = RgbaImage::new(w as u32, h as u32);
+        for (i, px) in buffer.as_chunks::<4>().0.iter().enumerate() {
+            let x = (i as u32) % w as u32;
+            let y = (i as u32) / w as u32;
+            img.put_pixel(x, y, image::Rgba([px[2], px[1], px[0], 255]));
+        }
+        Ok(img)
     }
-    Ok(img)
 }
 
 unsafe fn capture(rect: &CaptureRect, cursor: bool, grid: bool) -> Result<RgbaImage, CmdError> {
-    let screen_dc = GetDC(HWND::default());
-    if screen_dc.is_invalid() {
-        return Err(CmdError::os("could not get screen device context"));
+    unsafe {
+        let screen_dc = GetDC(HWND::default());
+        if screen_dc.is_invalid() {
+            return Err(CmdError::os("could not get screen device context"));
+        }
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        let bitmap = CreateCompatibleBitmap(screen_dc, rect.w, rect.h);
+        let old_bitmap = SelectObject(mem_dc, bitmap);
+
+        let blt_ok = BitBlt(mem_dc, 0, 0, rect.w, rect.h, screen_dc, rect.x, rect.y, SRCCOPY);
+
+        let result = (|| -> Result<RgbaImage, CmdError> {
+            blt_ok.map_err(|e| CmdError::os(e.to_string()))?;
+            if cursor {
+                draw_cursor(mem_dc, rect.x, rect.y);
+            }
+            if grid {
+                draw_grid(mem_dc, rect.x, rect.y, rect.w, rect.h);
+            }
+            dib_to_image(mem_dc, bitmap, rect.w, rect.h)
+        })();
+
+        SelectObject(mem_dc, old_bitmap);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(HWND::default(), screen_dc);
+
+        result
     }
-    let mem_dc = CreateCompatibleDC(screen_dc);
-    let bitmap = CreateCompatibleBitmap(screen_dc, rect.w, rect.h);
-    let old_bitmap = SelectObject(mem_dc, bitmap);
-
-    let blt_ok = BitBlt(mem_dc, 0, 0, rect.w, rect.h, screen_dc, rect.x, rect.y, SRCCOPY);
-
-    let result = (|| -> Result<RgbaImage, CmdError> {
-        blt_ok.map_err(|e| CmdError::os(e.to_string()))?;
-        if cursor {
-            draw_cursor(mem_dc, rect.x, rect.y);
-        }
-        if grid {
-            draw_grid(mem_dc, rect.x, rect.y, rect.w, rect.h);
-        }
-        dib_to_image(mem_dc, bitmap, rect.w, rect.h)
-    })();
-
-    SelectObject(mem_dc, old_bitmap);
-    let _ = DeleteObject(bitmap);
-    let _ = DeleteDC(mem_dc);
-    ReleaseDC(HWND::default(), screen_dc);
-
-    result
 }
 
 /// Captures pixels without PNG-encoding them, for callers (like OCR) that
@@ -218,7 +227,7 @@ pub fn take(
     scale: Option<f32>,
     cursor: bool,
     grid: bool,
-) -> Result<(u32, u32, Vec<u8>, Option<(i32, i32)>), CmdError> {
+) -> Result<Screenshot, CmdError> {
     let specified = [monitor.is_some(), window.is_some(), region.is_some()]
         .iter()
         .filter(|&&b| b)

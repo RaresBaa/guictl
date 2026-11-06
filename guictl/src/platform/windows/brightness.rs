@@ -5,7 +5,7 @@ use windows::Win32::Devices::Display::{
 };
 use windows::Win32::Graphics::Gdi::HMONITOR;
 
-fn parse_monitor_id(id: &str) -> Result<HMONITOR, CmdError> {
+pub(super) fn parse_monitor_id(id: &str) -> Result<HMONITOR, CmdError> {
     let raw = usize::from_str_radix(id.trim_start_matches("0x"), 16)
         .map_err(|_| CmdError::invalid_args(format!("invalid monitor id: {id}")))?;
     Ok(HMONITOR(raw as *mut _))
@@ -14,10 +14,10 @@ fn parse_monitor_id(id: &str) -> Result<HMONITOR, CmdError> {
 /// DDC/CI exposes one monitor per physical display, but a single `HMONITOR`
 /// can in principle map to more than one (e.g. a KVM). We operate on the
 /// first, which matches every normal single-display setup.
-struct PhysicalMonitor(PHYSICAL_MONITOR);
+pub(super) struct PhysicalMonitor(PHYSICAL_MONITOR);
 
 impl PhysicalMonitor {
-    fn open(hmonitor: HMONITOR) -> Result<Self, CmdError> {
+    pub(super) fn open(hmonitor: HMONITOR) -> Result<Self, CmdError> {
         unsafe {
             let mut count = 0u32;
             GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count)
@@ -38,7 +38,7 @@ impl PhysicalMonitor {
         }
     }
 
-    fn handle(&self) -> windows::Win32::Foundation::HANDLE {
+    pub(super) fn handle(&self) -> windows::Win32::Foundation::HANDLE {
         self.0.hPhysicalMonitor
     }
 }

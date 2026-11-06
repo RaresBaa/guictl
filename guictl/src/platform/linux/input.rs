@@ -40,7 +40,7 @@ impl Watch {
 
 /// A key release doesn't count: the key that started guictl, such as the
 /// return that ran the command, comes up just after the watch begins.
-fn is_person(event: &[u8]) -> bool {
+fn is_person(event: &[u8; EVENT_SIZE]) -> bool {
     let kind = u16::from_ne_bytes([event[TIME_SIZE], event[TIME_SIZE + 1]]);
     let value = i32::from_ne_bytes([
         event[TIME_SIZE + 4],
@@ -93,7 +93,7 @@ fn open(name: &str) -> Result<Option<File>, CmdError> {
 fn read_device(name: String, mut file: File) {
     let mut buf = [0u8; EVENT_SIZE * 64];
     while let Ok(n @ 1..) = file.read(&mut buf) {
-        if buf[..n].chunks_exact(EVENT_SIZE).any(is_person) {
+        if buf[..n].as_chunks::<EVENT_SIZE>().0.iter().any(is_person) {
             SEEN.store(true, Ordering::SeqCst);
         }
     }
@@ -128,10 +128,10 @@ pub fn watch() -> Result<Watch, CmdError> {
     std::thread::spawn(|| loop {
         std::thread::sleep(RESCAN);
         for name in devices().unwrap_or_default() {
-            if !WATCHED.lock().unwrap().contains(&name) {
-                if let Ok(Some(file)) = open(&name) {
-                    start_reading(&name, file);
-                }
+            if !WATCHED.lock().unwrap().contains(&name)
+                && let Ok(Some(file)) = open(&name)
+            {
+                start_reading(&name, file);
             }
         }
     });
@@ -143,12 +143,12 @@ pub fn watch() -> Result<Watch, CmdError> {
 mod tests {
     use super::*;
 
-    fn event(kind: u16, value: i32) -> Vec<u8> {
+    fn event(kind: u16, value: i32) -> [u8; EVENT_SIZE] {
         let mut bytes = vec![0; TIME_SIZE];
         bytes.extend(kind.to_ne_bytes());
         bytes.extend(0u16.to_ne_bytes());
         bytes.extend(value.to_ne_bytes());
-        bytes
+        bytes.try_into().unwrap()
     }
 
     #[test]

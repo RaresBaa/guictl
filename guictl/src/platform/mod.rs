@@ -1,3 +1,7 @@
+/// What `screenshot::take` returns: width, height, the encoded image, and
+/// where the capture's top-left corner sits on the desktop, when it has one.
+pub type Screenshot = (u32, u32, Vec<u8>, Option<(i32, i32)>);
+
 #[cfg(all(windows, not(guictl_stub)))]
 pub mod windows;
 #[cfg(all(windows, not(guictl_stub)))]

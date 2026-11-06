@@ -103,6 +103,7 @@ pub const GUIDE: &str = r#"ON THIS SYSTEM (Linux, KDE Plasma on Wayland)
   no "idle_ms": Wayland doesn't tell programs.
 - `media` commands go to one player: the one playing, else a paused one. A
   browser counts as one player however many tabs play.
-- `audio device disable` turns off the whole sound card the device belongs
-  to, so every input and output on it.
+- `audio device disable` turns off only that device on most sound cards, but
+  the whole card, so every input and output on it, when the card is in a
+  "Pro Audio", UCM ("HiFi") or Bluetooth profile.
 "#;

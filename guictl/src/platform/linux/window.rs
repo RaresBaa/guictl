@@ -114,7 +114,7 @@ pub(crate) fn unwrapped_name(name: &str) -> &str {
 fn window_info(raw: RawWindow) -> WindowInfo {
     let pid = u32::try_from(raw.pid).unwrap_or(0);
     let app = match unwrapped_name(&process_name(pid)) {
-        name if name.is_empty() => raw.class.clone(),
+        "" => raw.class.clone(),
         name => name.to_string(),
     };
     WindowInfo {

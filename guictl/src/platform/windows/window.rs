@@ -238,9 +238,9 @@ pub fn resolve(
     }
     let windows = list(None)?;
     let found = windows.into_iter().find(|w| {
-        title.map_or(true, |t| w.title.to_lowercase().contains(&t.to_lowercase()))
-            && app.map_or(true, |a| w.app.eq_ignore_ascii_case(a))
-            && pid.map_or(true, |p| w.pid == p)
+        title.is_none_or(|t| w.title.to_lowercase().contains(&t.to_lowercase()))
+            && app.is_none_or(|a| w.app.eq_ignore_ascii_case(a))
+            && pid.is_none_or(|p| w.pid == p)
     });
     match found {
         Some(w) => parse_id(&w.id),

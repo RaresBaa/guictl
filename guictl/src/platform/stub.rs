@@ -148,6 +148,12 @@ pub mod workspace {
     pub fn switch(_id: &str) -> Result<(), CmdError> {
         unsupported("workspace")
     }
+    pub fn remove(_id: &str) -> Result<(), CmdError> {
+        unsupported("workspace")
+    }
+    pub fn create(_name: Option<&str>) -> Result<WorkspaceInfo, CmdError> {
+        unsupported("workspace")
+    }
     pub fn send_window(_window: WindowHandle, _id: &str) -> Result<(), CmdError> {
         unsupported("workspace")
     }
@@ -253,6 +259,7 @@ pub mod monitor {
 pub mod screenshot {
     use super::unsupported;
     use crate::output::CmdError;
+    use crate::platform::Screenshot;
 
     pub fn take(
         _monitor: Option<&str>,
@@ -261,7 +268,7 @@ pub mod screenshot {
         _scale: Option<f32>,
         _cursor: bool,
         _grid: bool,
-    ) -> Result<(u32, u32, Vec<u8>, Option<(i32, i32)>), CmdError> {
+    ) -> Result<Screenshot, CmdError> {
         unsupported("screenshot")
     }
 }

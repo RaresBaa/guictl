@@ -43,7 +43,7 @@ pub fn read(monitor: Option<&str>, window: Option<&str>, region: Option<&str>) -
 
     // RgbaImage stores R,G,B,A per pixel; SoftwareBitmap's Bgra8 format wants B,G,R,A.
     let mut bgra = img.into_raw();
-    for px in bgra.chunks_exact_mut(4) {
+    for px in bgra.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
 

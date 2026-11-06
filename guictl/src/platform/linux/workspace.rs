@@ -23,12 +23,34 @@ function findDesktop(id) {
 }
 "#;
 
+const DESCRIBE: &str = r#"
+function describe(d) {
+    return { id: d.id, name: d.name, index: d.x11DesktopNumber, current: d === workspace.currentDesktop };
+}
+"#;
+
+fn parse<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, CmdError> {
+    serde_json::from_value(value).map_err(|e| CmdError::os(format!("unexpected workspace data from KWin: {e}")))
+}
+
 pub fn list() -> Result<Vec<WorkspaceInfo>, CmdError> {
-    let value = kwin::run(
-        "return workspace.desktops.map(function (d) {\n    return { id: d.id, name: d.name, index: d.x11DesktopNumber, current: d === workspace.currentDesktop };\n});",
-    )?;
-    serde_json::from_value(value)
-        .map_err(|e| CmdError::os(format!("unexpected workspace data from KWin: {e}")))
+    parse(kwin::run(&format!("{DESCRIBE}\nreturn workspace.desktops.map(describe);"))?)
+}
+
+/// KWin moves its windows to another desktop.
+pub fn remove(id: &str) -> Result<(), CmdError> {
+    if list()?.len() == 1 {
+        return Err(CmdError::invalid_args("can't remove the only workspace"));
+    }
+    kwin::run(&format!("{PRELUDE}\nworkspace.removeDesktop(findDesktop({}));", js_str(id))).map(|_| ())
+}
+
+/// Given an empty name, KWin calls the desktop "Desktop N" itself.
+pub fn create(name: Option<&str>) -> Result<WorkspaceInfo, CmdError> {
+    parse(kwin::run(&format!(
+        "{DESCRIBE}\nvar at = workspace.desktops.length;\nworkspace.createDesktop(at, {});\nreturn describe(workspace.desktops[at]);",
+        js_str(name.unwrap_or(""))
+    ))?)
 }
 
 /// `id` is a workspace id from `list`, or its 1-based index.

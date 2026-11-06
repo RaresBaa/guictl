@@ -26,20 +26,30 @@ pub const IMPLEMENTED: &[&str] = &[
     "--elevate",
 ];
 
-/// Implemented commands this machine can't run right now; none here.
-pub fn unavailable() -> &'static [&'static str] {
-    &[]
+/// Implemented commands this machine can't run right now.
+pub fn unavailable() -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if !workspace::available() {
+        missing.extend(["workspace", "window send --workspace"]);
+    }
+    missing
 }
 
-pub const NOT_IMPLEMENTED: &[&str] = &[
-    "monitor power", "monitor set --enabled",
-    "workspace", "window send --workspace",
-];
+pub const NOT_IMPLEMENTED: &[&str] = &[];
 
 /// The Windows part of `guictl guide`.
 pub const GUIDE: &str = r#"ON THIS SYSTEM (Windows)
-- Virtual desktops (`workspace`, `window send --workspace`), `monitor power`
-  and `monitor set --enabled` are not supported; they exit with code 10.
+- Virtual desktops (`workspace`, `window send --workspace`) work on Windows
+  10 only; on Windows 11 they fail with "unsupported" (exit code 10). A
+  window without a taskbar entry can't be sent to another desktop.
+- A monitor that `monitor set --enabled off` took off the desktop gets a new
+  id in `monitor list`, starting with "target-"; use that one to enable it.
+  Windows decides where it comes back, so add `--position` to put it where it
+  was. Its windows move to the other monitors and don't move back. The
+  primary monitor can't be disabled.
+- `monitor power` talks to the monitor over DDC/CI, so it fails with
+  "unsupported" on most laptop panels and on monitors with DDC/CI switched off
+  in their own menu. Some monitors only wake from their own power button.
 - Windows of programs running as administrator ignore a guictl that is not
   itself running as administrator: commands that act on one, or read its
   elements, fail with "permission_denied". `window focus` and screenshots

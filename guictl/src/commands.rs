@@ -56,6 +56,14 @@ pub fn dispatch(command: Command) -> CmdResult {
             os::workspace::switch(&id)?;
             Ok(json!({ "ok": true }))
         }
+        Command::Workspace(WorkspaceCmd::Remove { id }) => {
+            os::workspace::remove(&id)?;
+            Ok(json!({ "ok": true }))
+        }
+        Command::Workspace(WorkspaceCmd::Create { name }) => {
+            let created = os::workspace::create(name.as_deref())?;
+            Ok(serde_json::to_value(created).unwrap())
+        }
     }
 }
 
@@ -532,11 +540,10 @@ fn launch(args: LaunchArgs) -> CmdResult {
     let timeout = std::time::Duration::from_millis(args.timeout.unwrap_or(5000));
     let start = std::time::Instant::now();
     let first = loop {
-        if let Ok(windows) = os::window::list(None) {
-            if let Some(w) = windows.into_iter().find(|w| ours(w)) {
+        if let Ok(windows) = os::window::list(None)
+            && let Some(w) = windows.into_iter().find(|w| ours(w)) {
                 break w;
             }
-        }
         if start.elapsed() >= timeout {
             return Err(CmdError::timeout(
                 "timed out waiting for the launched app's window",

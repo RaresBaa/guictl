@@ -662,6 +662,17 @@ pub enum WorkspaceCmd {
         /// Workspace id from `workspace list`, or its position counting from 1
         id: String,
     },
+    /// Remove a virtual desktop; its windows move to another one. The last one can't be removed
+    Remove {
+        /// Workspace id from `workspace list`, or its position counting from 1
+        id: String,
+    },
+    /// Add a virtual desktop after the last one, without switching to it
+    Create {
+        /// Its name; without one it gets the system's default, such as "Desktop 3"
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 // ---- system ----

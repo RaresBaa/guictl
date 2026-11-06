@@ -64,11 +64,15 @@ pub(super) fn automation() -> Result<IUIAutomation, CmdError> {
 }
 
 unsafe fn element_name(el: &IUIAutomationElement) -> String {
-    el.CurrentName().map(|b| b.to_string()).unwrap_or_default()
+    unsafe {
+        el.CurrentName().map(|b| b.to_string()).unwrap_or_default()
+    }
 }
 
 unsafe fn element_role(el: &IUIAutomationElement) -> String {
-    el.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default()
+    unsafe {
+        el.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default()
+    }
 }
 
 /// Values longer than this are cut short in listings; `element text get`
@@ -79,143 +83,159 @@ const MAX_VALUE_CHARS: usize = 200;
 /// the control types that have it: each question is a round trip to the
 /// app, and a listing can hold hundreds of elements.
 unsafe fn element_state(el: &IUIAutomationElement) -> (Option<String>, Option<bool>, bool) {
-    let Ok(control) = el.CurrentControlType() else { return (None, None, false) };
-    if [UIA_EditControlTypeId, UIA_ComboBoxControlTypeId, UIA_SpinnerControlTypeId, UIA_SliderControlTypeId]
+    unsafe {
+        let Ok(control) = el.CurrentControlType() else { return (None, None, false) };
+        if [UIA_EditControlTypeId, UIA_ComboBoxControlTypeId, UIA_SpinnerControlTypeId, UIA_SliderControlTypeId]
+            .contains(&control)
+        {
+            let value = el
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                .and_then(|p| p.CurrentValue())
+                .ok()
+                .map(|b| {
+                    let text = b.to_string();
+                    match text.char_indices().nth(MAX_VALUE_CHARS) {
+                        Some((cut, _)) => format!("{}…", &text[..cut]),
+                        None => text,
+                    }
+                })
+                .or_else(|| {
+                    // A slider or spinner may only report a number.
+                    el.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
+                        .and_then(|p| p.CurrentValue())
+                        .ok()
+                        .map(|v| v.to_string())
+                });
+            return (value, None, false);
+        }
+        if [
+            UIA_CheckBoxControlTypeId,
+            UIA_ButtonControlTypeId,
+            UIA_MenuItemControlTypeId,
+            UIA_ListItemControlTypeId,
+            UIA_TreeItemControlTypeId,
+            UIA_DataItemControlTypeId,
+            UIA_CustomControlTypeId,
+        ]
         .contains(&control)
-    {
-        let value = el
-            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-            .and_then(|p| p.CurrentValue())
-            .ok()
-            .map(|b| {
-                let text = b.to_string();
-                match text.char_indices().nth(MAX_VALUE_CHARS) {
-                    Some((cut, _)) => format!("{}…", &text[..cut]),
-                    None => text,
-                }
-            })
-            .or_else(|| {
-                // A slider or spinner may only report a number.
-                el.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
-                    .and_then(|p| p.CurrentValue())
-                    .ok()
-                    .map(|v| v.to_string())
-            });
-        return (value, None, false);
+        {
+            let state = el
+                .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                .and_then(|p| p.CurrentToggleState());
+            let (checked, mixed) = match state {
+                Ok(s) if s == ToggleState_On => (Some(true), false),
+                Ok(s) if s == ToggleState_Off => (Some(false), false),
+                Ok(_) => (None, true),
+                Err(_) => legacy_checked(el),
+            };
+            return (None, checked, mixed);
+        }
+        if [UIA_RadioButtonControlTypeId, UIA_TabItemControlTypeId].contains(&control) {
+            let selected = el
+                .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
+                .and_then(|p| p.CurrentIsSelected())
+                .ok()
+                .map(|b| b.as_bool());
+            return (None, selected, false);
+        }
+        (None, None, false)
     }
-    if [
-        UIA_CheckBoxControlTypeId,
-        UIA_ButtonControlTypeId,
-        UIA_MenuItemControlTypeId,
-        UIA_ListItemControlTypeId,
-        UIA_TreeItemControlTypeId,
-        UIA_DataItemControlTypeId,
-        UIA_CustomControlTypeId,
-    ]
-    .contains(&control)
-    {
-        let state = el
-            .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-            .and_then(|p| p.CurrentToggleState());
-        let (checked, mixed) = match state {
-            Ok(s) if s == ToggleState_On => (Some(true), false),
-            Ok(s) if s == ToggleState_Off => (Some(false), false),
-            Ok(_) => (None, true),
-            Err(_) => legacy_checked(el),
-        };
-        return (None, checked, mixed);
-    }
-    if [UIA_RadioButtonControlTypeId, UIA_TabItemControlTypeId].contains(&control) {
-        let selected = el
-            .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
-            .and_then(|p| p.CurrentIsSelected())
-            .ok()
-            .map(|b| b.as_bool());
-        return (None, selected, false);
-    }
-    (None, None, false)
 }
 
 /// The check mark as MSAA reports it, for controls with no Toggle pattern,
 /// such as the items of a native menu. MSAA only flags "checked", so a
 /// missing flag means "off" only for a role that is always checkable.
 unsafe fn legacy_checked(el: &IUIAutomationElement) -> (Option<bool>, bool) {
-    let Ok(legacy) = el.GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(UIA_LegacyIAccessiblePatternId)
-    else {
-        return (None, false);
-    };
-    let Ok(state) = legacy.CurrentState() else { return (None, false) };
-    if state & STATE_SYSTEM_MIXED != 0 {
-        return (None, true);
+    unsafe {
+        let Ok(legacy) = el.GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(UIA_LegacyIAccessiblePatternId)
+        else {
+            return (None, false);
+        };
+        let Ok(state) = legacy.CurrentState() else { return (None, false) };
+        if state & STATE_SYSTEM_MIXED != 0 {
+            return (None, true);
+        }
+        if state & STATE_SYSTEM_CHECKED != 0 {
+            return (Some(true), false);
+        }
+        let Ok(role) = legacy.CurrentRole() else { return (None, false) };
+        ([ROLE_SYSTEM_CHECKBUTTON, ROLE_SYSTEM_RADIOBUTTON].contains(&role).then_some(false), false)
     }
-    if state & STATE_SYSTEM_CHECKED != 0 {
-        return (Some(true), false);
-    }
-    let Ok(role) = legacy.CurrentRole() else { return (None, false) };
-    ([ROLE_SYSTEM_CHECKBUTTON, ROLE_SYSTEM_RADIOBUTTON].contains(&role).then_some(false), false)
 }
 
 unsafe fn element_rect(el: &IUIAutomationElement) -> (i32, i32, i32, i32) {
-    match el.CurrentBoundingRectangle() {
-        Ok(r) => (r.left, r.top, r.right - r.left, r.bottom - r.top),
-        Err(_) => (0, 0, 0, 0),
+    unsafe {
+        match el.CurrentBoundingRectangle() {
+            Ok(r) => (r.left, r.top, r.right - r.left, r.bottom - r.top),
+            Err(_) => (0, 0, 0, 0),
+        }
     }
 }
 
 unsafe fn describe(el: &IUIAutomationElement, id: String) -> ElementInfo {
-    let (x, y, w, h) = element_rect(el);
-    let (value, checked, mixed) = element_state(el);
-    let disabled = el.CurrentIsEnabled().is_ok_and(|enabled| !enabled.as_bool());
-    ElementInfo { id, name: element_name(el), role: element_role(el), x, y, w, h, value, checked, mixed, disabled }
+    unsafe {
+        let (x, y, w, h) = element_rect(el);
+        let (value, checked, mixed) = element_state(el);
+        let disabled = el.CurrentIsEnabled().is_ok_and(|enabled| !enabled.as_bool());
+        ElementInfo { id, name: element_name(el), role: element_role(el), x, y, w, h, value, checked, mixed, disabled }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn is_exact(el: &ElementInfo, name: Option<&str>) -> bool {
-    name.map_or(true, |n| el.name.to_lowercase() == n.to_lowercase())
+    name.is_none_or(|n| el.name.to_lowercase() == n.to_lowercase())
 }
 
 fn has_exact(found: &[ElementInfo], name: Option<&str>) -> bool {
     found.iter().any(|el| is_exact(el, name))
 }
 
+/// What `collect` looks for, the same at every level of the tree.
+struct Search<'a> {
+    walker: &'a IUIAutomationTreeWalker,
+    hwnd_id: &'a str,
+    role_filter: Option<&'a str>,
+    name_filter: Option<&'a str>,
+    stop_at_first: bool,
+}
+
 unsafe fn collect(
-    walker: &IUIAutomationTreeWalker,
+    search: &Search,
     parent: &IUIAutomationElement,
     path: &mut Vec<usize>,
     depth: usize,
-    hwnd_id: &str,
-    role_filter: Option<&str>,
-    name_filter: Option<&str>,
-    stop_at_first: bool,
     out: &mut Vec<ElementInfo>,
 ) {
-    if depth > MAX_DEPTH {
-        return;
-    }
-    let mut next = walker.GetFirstChildElement(parent);
-    let mut index = 0usize;
-    while let Ok(child) = next {
-        if out.len() >= MAX_RESULTS || (stop_at_first && has_exact(out, name_filter)) {
+    let Search { walker, hwnd_id, role_filter, name_filter, stop_at_first } = *search;
+    unsafe {
+        if depth > MAX_DEPTH {
             return;
         }
-        path.push(index);
-        let role = element_role(&child);
-        let name = element_name(&child);
-        let role_ok = role_filter.map_or(true, |r| role.eq_ignore_ascii_case(r));
-        let name_ok = name_filter.map_or(true, |n| name.to_lowercase().contains(&n.to_lowercase()));
-        if role_ok && name_ok {
-            let id = format!(
-                "{hwnd_id}/{}",
-                path.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/")
-            );
-            out.push(describe(&child, id));
+        let mut next = walker.GetFirstChildElement(parent);
+        let mut index = 0usize;
+        while let Ok(child) = next {
+            if out.len() >= MAX_RESULTS || (stop_at_first && has_exact(out, name_filter)) {
+                return;
+            }
+            path.push(index);
+            let role = element_role(&child);
+            let name = element_name(&child);
+            let role_ok = role_filter.is_none_or(|r| role.eq_ignore_ascii_case(r));
+            let name_ok = name_filter.is_none_or(|n| name.to_lowercase().contains(&n.to_lowercase()));
+            if role_ok && name_ok {
+                let id = format!(
+                    "{hwnd_id}/{}",
+                    path.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/")
+                );
+                out.push(describe(&child, id));
+            }
+            if !(stop_at_first && has_exact(out, name_filter)) {
+                collect(search, &child, path, depth + 1, out);
+            }
+            path.pop();
+            next = walker.GetNextSiblingElement(&child);
+            index += 1;
         }
-        if !(stop_at_first && has_exact(out, name_filter)) {
-            collect(walker, &child, path, depth + 1, hwnd_id, role_filter, name_filter, stop_at_first, out);
-        }
-        path.pop();
-        next = walker.GetNextSiblingElement(&child);
-        index += 1;
     }
 }
 
@@ -268,7 +288,8 @@ fn search(
             .map_err(|e| CmdError::os(e.to_string()))?;
         let mut out = Vec::new();
         let mut path = Vec::new();
-        collect(&walker, &root, &mut path, 0, &hwnd_id, role, name, stop_at_first, &mut out);
+        let search = Search { walker: &walker, hwnd_id: &hwnd_id, role_filter: role, name_filter: name, stop_at_first };
+        collect(&search, &root, &mut path, 0, &mut out);
         Ok(out)
     }
 }
@@ -419,45 +440,49 @@ pub fn check(id: &str, on: bool) -> Result<(), CmdError> {
 }
 
 unsafe fn select_item(item: &IUIAutomationElement) -> Result<(), CmdError> {
-    let pattern = item
-        .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
-        .map_err(|_| CmdError::unsupported("this element can't be selected"))?;
-    pattern.Select().map_err(os_err)?;
-    let selected = || pattern.CurrentIsSelected().is_ok_and(|s| s.as_bool());
-    if settle(selected) { Ok(()) } else { Err(CmdError::os("the item accepted the selection but isn't selected")) }
+    unsafe {
+        let pattern = item
+            .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
+            .map_err(|_| CmdError::unsupported("this element can't be selected"))?;
+        pattern.Select().map_err(os_err)?;
+        let selected = || pattern.CurrentIsSelected().is_ok_and(|s| s.as_bool());
+        if settle(selected) { Ok(()) } else { Err(CmdError::os("the item accepted the selection but isn't selected")) }
+    }
 }
 
 /// The selectable item under `container` with that name. A dropdown may only
 /// fill its list a moment after opening, so this keeps looking for a second.
 unsafe fn find_selectable(container: &IUIAutomationElement, wanted: &str) -> Result<IUIAutomationElement, CmdError> {
-    let automation = automation()?;
-    let condition = automation
-        .CreatePropertyCondition(UIA_IsSelectionItemPatternAvailablePropertyId, &VARIANT::from(true))
-        .map_err(os_err)?;
-    let wanted_lower = wanted.to_lowercase();
-    let mut names = Vec::new();
-    for _ in 0..10 {
-        let items = container.FindAll(TreeScope_Descendants, &condition).map_err(os_err)?;
-        names.clear();
-        let mut partial = None;
-        for i in 0..items.Length().unwrap_or(0) {
-            let Ok(item) = items.GetElement(i) else { continue };
-            let name = element_name(&item);
-            let lower = name.to_lowercase();
-            if lower == wanted_lower {
+    unsafe {
+        let automation = automation()?;
+        let condition = automation
+            .CreatePropertyCondition(UIA_IsSelectionItemPatternAvailablePropertyId, &VARIANT::from(true))
+            .map_err(os_err)?;
+        let wanted_lower = wanted.to_lowercase();
+        let mut names = Vec::new();
+        for _ in 0..10 {
+            let items = container.FindAll(TreeScope_Descendants, &condition).map_err(os_err)?;
+            names.clear();
+            let mut partial = None;
+            for i in 0..items.Length().unwrap_or(0) {
+                let Ok(item) = items.GetElement(i) else { continue };
+                let name = element_name(&item);
+                let lower = name.to_lowercase();
+                if lower == wanted_lower {
+                    return Ok(item);
+                }
+                if partial.is_none() && lower.contains(&wanted_lower) {
+                    partial = Some(item);
+                }
+                names.push(name);
+            }
+            if let Some(item) = partial {
                 return Ok(item);
             }
-            if partial.is_none() && lower.contains(&wanted_lower) {
-                partial = Some(item);
-            }
-            names.push(name);
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        if let Some(item) = partial {
-            return Ok(item);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        Err(CmdError::not_found(format!("no item \"{wanted}\" here; it has: {}", names.join(", "))))
     }
-    Err(CmdError::not_found(format!("no item \"{wanted}\" here; it has: {}", names.join(", "))))
 }
 
 pub fn select(id: &str, item: Option<&str>) -> Result<(), CmdError> {
@@ -487,64 +512,68 @@ pub fn select(id: &str, item: Option<&str>) -> Result<(), CmdError> {
 }
 
 unsafe fn no_selectable_items(el: &IUIAutomationElement) -> Result<bool, CmdError> {
-    let condition = automation()?
-        .CreatePropertyCondition(UIA_IsSelectionItemPatternAvailablePropertyId, &VARIANT::from(true))
-        .map_err(os_err)?;
-    let items = el.FindAll(TreeScope_Descendants, &condition).map_err(os_err)?;
-    Ok(items.Length().unwrap_or(0) == 0)
+    unsafe {
+        let condition = automation()?
+            .CreatePropertyCondition(UIA_IsSelectionItemPatternAvailablePropertyId, &VARIANT::from(true))
+            .map_err(os_err)?;
+        let items = el.FindAll(TreeScope_Descendants, &condition).map_err(os_err)?;
+        Ok(items.Length().unwrap_or(0) == 0)
+    }
 }
 
 /// For a dropdown that doesn't expose its items, as WinForms ones don't: set
 /// the text if it takes that, otherwise walk its values with the arrow keys,
 /// which works without opening it. The app sees each value go by.
 unsafe fn select_by_value(id: &str, el: &IUIAutomationElement, wanted: &str) -> Result<(), CmdError> {
-    let pattern = el
-        .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-        .map_err(|_| CmdError::unsupported("this dropdown shows neither its items nor its value"))?;
-    let value = || pattern.CurrentValue().map(|b| b.to_string()).unwrap_or_default();
-    if !pattern.CurrentIsReadOnly().is_ok_and(|r| r.as_bool())
-        && pattern.SetValue(&BSTR::from(wanted)).is_ok()
-        && settle(|| value().eq_ignore_ascii_case(wanted))
-    {
-        return Ok(());
-    }
-    super::window::focus(super::window::parse_id(id.split('/').next().unwrap_or_default())?)?;
-    el.SetFocus().map_err(os_err)?;
-    let start = value();
-    let press = |key: &str| -> Result<(), CmdError> {
-        let before = value();
-        super::keyboard::key(key, 1)?;
-        settle(|| value() != before);
-        Ok(())
-    };
-    press("home")?;
-    let mut values = vec![value()];
-    while values.len() < 500 {
-        press("down")?;
-        let now = value();
-        if values.last() == Some(&now) {
-            break;
+    unsafe {
+        let pattern = el
+            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            .map_err(|_| CmdError::unsupported("this dropdown shows neither its items nor its value"))?;
+        let value = || pattern.CurrentValue().map(|b| b.to_string()).unwrap_or_default();
+        if !pattern.CurrentIsReadOnly().is_ok_and(|r| r.as_bool())
+            && pattern.SetValue(&BSTR::from(wanted)).is_ok()
+            && settle(|| value().eq_ignore_ascii_case(wanted))
+        {
+            return Ok(());
         }
-        values.push(now);
-    }
-    let lower = wanted.to_lowercase();
-    let target = values
-        .iter()
-        .position(|v| v.to_lowercase() == lower)
-        .or_else(|| values.iter().position(|v| v.to_lowercase().contains(&lower)));
-    // Back where it was if the item isn't there.
-    let index = target.or_else(|| values.iter().position(|v| *v == start)).unwrap_or(0);
-    press("home")?;
-    for _ in 0..index {
-        press("down")?;
-    }
-    if target.is_none() {
-        return Err(CmdError::not_found(format!("no item \"{wanted}\" here; it has: {}", values.join(", "))));
-    }
-    if value() == values[index] {
-        Ok(())
-    } else {
-        Err(CmdError::os("the dropdown did not reach that item"))
+        super::window::focus(super::window::parse_id(id.split('/').next().unwrap_or_default())?)?;
+        el.SetFocus().map_err(os_err)?;
+        let start = value();
+        let press = |key: &str| -> Result<(), CmdError> {
+            let before = value();
+            super::keyboard::key(key, 1)?;
+            settle(|| value() != before);
+            Ok(())
+        };
+        press("home")?;
+        let mut values = vec![value()];
+        while values.len() < 500 {
+            press("down")?;
+            let now = value();
+            if values.last() == Some(&now) {
+                break;
+            }
+            values.push(now);
+        }
+        let lower = wanted.to_lowercase();
+        let target = values
+            .iter()
+            .position(|v| v.to_lowercase() == lower)
+            .or_else(|| values.iter().position(|v| v.to_lowercase().contains(&lower)));
+        // Back where it was if the item isn't there.
+        let index = target.or_else(|| values.iter().position(|v| *v == start)).unwrap_or(0);
+        press("home")?;
+        for _ in 0..index {
+            press("down")?;
+        }
+        if target.is_none() {
+            return Err(CmdError::not_found(format!("no item \"{wanted}\" here; it has: {}", values.join(", "))));
+        }
+        if value() == values[index] {
+            Ok(())
+        } else {
+            Err(CmdError::os("the dropdown did not reach that item"))
+        }
     }
 }
 

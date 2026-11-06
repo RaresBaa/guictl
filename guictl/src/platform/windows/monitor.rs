@@ -1,13 +1,21 @@
 use crate::output::CmdError;
 use serde::Serialize;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINTL, RECT};
+use windows::Win32::Devices::Display::{
+    DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig, SetDisplayConfig,
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+    DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+    DISPLAYCONFIG_PATH_SOURCE_INFO, DISPLAYCONFIG_PATH_TARGET_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, DISPLAYCONFIG_TARGET_PREFERRED_MODE, QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS,
+    QUERY_DISPLAY_CONFIG_FLAGS, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+};
+use windows::Win32::Foundation::{BOOL, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HWND, LPARAM, POINTL, RECT};
 use windows::Win32::Graphics::Gdi::{
-    ChangeDisplaySettingsExW, EnumDisplayDevicesW, EnumDisplayMonitors, EnumDisplaySettingsW,
+    ChangeDisplaySettingsExW, EnumDisplayMonitors, EnumDisplaySettingsW,
     GetMonitorInfoW, CDS_NORESET, CDS_SET_PRIMARY, CDS_TYPE, CDS_UPDATEREGISTRY, DEVMODEW,
-    DEVMODE_FIELD_FLAGS, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISP_CHANGE_SUCCESSFUL,
+    DEVMODE_FIELD_FLAGS, DISP_CHANGE_SUCCESSFUL,
     DMDO_180, DMDO_270, DMDO_90, DMDO_DEFAULT, DM_DISPLAYFREQUENCY, DM_DISPLAYORIENTATION,
-    DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS, HDC,
+    DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, ENUM_CURRENT_SETTINGS, HDC,
     HMONITOR, MONITORINFOEXW,
 };
 
@@ -24,9 +32,10 @@ pub struct MonitorInfo {
     pub height: i32,
     pub primary: bool,
     pub refresh_rate: u32,
-    /// False for a monitor that's been `--enabled off`: it has no HMONITOR
-    /// (so `id` is its device name, e.g. `\\.\DISPLAY5`, not a hex handle),
-    /// and its geometry comes from its last saved settings, not live state.
+    /// False for a monitor that's plugged in but `--enabled off`: it has no
+    /// HMONITOR, so `id` names its connector (`target-...`), `name` is the
+    /// monitor's own name rather than `\\.\DISPLAYn`, and the size and
+    /// refresh rate are its preferred mode, at position 0,0.
     pub attached: bool,
 }
 
@@ -41,8 +50,7 @@ extern "system" fn enum_proc(hmonitor: HMONITOR, _hdc: HDC, _rect: *mut RECT, lp
         let name_end = info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len());
         let name = String::from_utf16_lossy(&info.szDevice[..name_end]);
 
-        let mut devmode = DEVMODEW::default();
-        devmode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+        let mut devmode = DEVMODEW { dmSize: std::mem::size_of::<DEVMODEW>() as u16, ..Default::default() };
         let mut refresh = 0u32;
         let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         if unsafe {
@@ -68,62 +76,182 @@ extern "system" fn enum_proc(hmonitor: HMONITOR, _hdc: HDC, _rect: *mut RECT, lp
     BOOL(1)
 }
 
-/// Surfaces display adapters that exist but aren't attached to the desktop
-/// (disabled via `--enabled off`, or just disconnected) - `EnumDisplayMonitors`
-/// above only sees attached ones, so without this a disabled monitor would
-/// have no id to re-enable it with. Geometry comes from each adapter's last
-/// saved settings (`ENUM_REGISTRY_SETTINGS`), which Windows keeps even while
-/// detached.
-fn list_detached(skip_names: &std::collections::HashSet<String>) -> Vec<MonitorInfo> {
-    let mut out = Vec::new();
-    let mut i = 0u32;
+/// `DISPLAYCONFIG_PATH_ACTIVE` and `DISPLAYCONFIG_PATH_MODE_IDX_INVALID`, not
+/// exposed as named constants by this version of `windows`.
+const PATH_ACTIVE: u32 = 0x1;
+const MODE_IDX_INVALID: u32 = 0xffff_ffff;
+
+/// The display topology as Windows' CCD (Connecting and Configuring Displays)
+/// API reports it: one path per source-to-monitor link, plus the modes the
+/// active ones use.
+struct DisplayConfig {
+    paths: Vec<DISPLAYCONFIG_PATH_INFO>,
+    modes: Vec<DISPLAYCONFIG_MODE_INFO>,
+}
+
+fn query_display_config(flags: QUERY_DISPLAY_CONFIG_FLAGS) -> Result<DisplayConfig, CmdError> {
     loop {
-        let mut dd = DISPLAY_DEVICEW::default();
-        dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
-        let ok = unsafe { EnumDisplayDevicesW(PCWSTR(std::ptr::null()), i, &mut dd, 0) };
-        if !ok.as_bool() {
-            break;
+        let (mut path_count, mut mode_count) = (0u32, 0u32);
+        let err = unsafe { GetDisplayConfigBufferSizes(flags, &mut path_count, &mut mode_count) };
+        if err != ERROR_SUCCESS {
+            return Err(CmdError::os(format!("could not size the display configuration (code {})", err.0)));
         }
-        i += 1;
-
-        if dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP != 0 {
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+        let err = unsafe {
+            QueryDisplayConfig(flags, &mut path_count, paths.as_mut_ptr(), &mut mode_count, modes.as_mut_ptr(), None)
+        };
+        // The topology changed between the two calls; size it again.
+        if err == ERROR_INSUFFICIENT_BUFFER {
             continue;
         }
-        let name_end = dd.DeviceName.iter().position(|&c| c == 0).unwrap_or(dd.DeviceName.len());
-        let name = String::from_utf16_lossy(&dd.DeviceName[..name_end]);
-        if skip_names.contains(&name) {
+        if err != ERROR_SUCCESS {
+            return Err(CmdError::os(format!("could not read the display configuration (code {})", err.0)));
+        }
+        paths.truncate(path_count as usize);
+        modes.truncate(mode_count as usize);
+        return Ok(DisplayConfig { paths, modes });
+    }
+}
+
+/// Applies exactly these paths as the new topology and saves it, so it
+/// survives a reboot. Only the modes the paths still point at are passed,
+/// renumbered to match.
+fn apply_display_config(paths: &[DISPLAYCONFIG_PATH_INFO], modes: &[DISPLAYCONFIG_MODE_INFO]) -> Result<(), CmdError> {
+    let mut paths = paths.to_vec();
+    let mut kept_modes: Vec<DISPLAYCONFIG_MODE_INFO> = Vec::new();
+    let mut renumbered: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for path in &mut paths {
+        let indices = unsafe {
+            [&mut path.sourceInfo.Anonymous.modeInfoIdx, &mut path.targetInfo.Anonymous.modeInfoIdx]
+        };
+        for idx in indices {
+            if *idx == MODE_IDX_INVALID {
+                continue;
+            }
+            *idx = *renumbered.entry(*idx).or_insert_with(|| {
+                kept_modes.push(modes[*idx as usize]);
+                (kept_modes.len() - 1) as u32
+            });
+        }
+    }
+    let modes = (!kept_modes.is_empty()).then_some(kept_modes.as_slice());
+    let result = unsafe {
+        SetDisplayConfig(
+            Some(&paths),
+            modes,
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE,
+        )
+    };
+    if result != 0 {
+        return Err(CmdError::os(format!("Windows refused the new display layout (code {result})")));
+    }
+    Ok(())
+}
+
+fn from_wide(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+
+/// The GDI name, e.g. `\\.\DISPLAY1`, that `MONITORINFOEXW::szDevice` reports
+/// for the monitor this source drives.
+fn source_gdi_name(source: &DISPLAYCONFIG_PATH_SOURCE_INFO) -> Option<String> {
+    let mut request = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+    request.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+    request.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+    request.header.adapterId = source.adapterId;
+    request.header.id = source.id;
+    (unsafe { DisplayConfigGetDeviceInfo(&mut request.header) } == 0)
+        .then(|| from_wide(&request.viewGdiDeviceName))
+}
+
+/// The monitor's own name from its EDID, such as "DELL P2419H".
+fn target_friendly_name(target: &DISPLAYCONFIG_PATH_TARGET_INFO) -> Option<String> {
+    let mut request = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+    request.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+    request.header.size = std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32;
+    request.header.adapterId = target.adapterId;
+    request.header.id = target.id;
+    (unsafe { DisplayConfigGetDeviceInfo(&mut request.header) } == 0)
+        .then(|| from_wide(&request.monitorFriendlyDeviceName))
+        .filter(|name| !name.is_empty())
+}
+
+/// The monitor's preferred width, height and refresh rate.
+fn target_preferred_mode(target: &DISPLAYCONFIG_PATH_TARGET_INFO) -> Option<(u32, u32, u32)> {
+    let mut request = DISPLAYCONFIG_TARGET_PREFERRED_MODE::default();
+    request.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE;
+    request.header.size = std::mem::size_of::<DISPLAYCONFIG_TARGET_PREFERRED_MODE>() as u32;
+    request.header.adapterId = target.adapterId;
+    request.header.id = target.id;
+    if unsafe { DisplayConfigGetDeviceInfo(&mut request.header) } != 0 {
+        return None;
+    }
+    let vsync = request.targetMode.targetVideoSignalInfo.vSyncFreq;
+    let refresh = if vsync.Denominator == 0 {
+        0
+    } else {
+        (vsync.Numerator as f64 / vsync.Denominator as f64).round() as u32
+    };
+    Some((request.width, request.height, refresh))
+}
+
+/// The id `monitor list` gives a disabled monitor. It has no HMONITOR, so the
+/// id names its CCD target: the graphics adapter and the connector on it.
+/// Adapter ids are only fixed until a reboot, like HMONITOR ids.
+fn target_monitor_id(target: &DISPLAYCONFIG_PATH_TARGET_INFO) -> String {
+    let adapter = match target.adapterId.HighPart {
+        0 => format!("{:x}", target.adapterId.LowPart),
+        high => format!("{:x}{:08x}", high as u32, target.adapterId.LowPart),
+    };
+    format!("target-{adapter}-{}", target.id)
+}
+
+fn same_target(a: &DISPLAYCONFIG_PATH_TARGET_INFO, b: &DISPLAYCONFIG_PATH_TARGET_INFO) -> bool {
+    a.adapterId == b.adapterId && a.id == b.id
+}
+
+fn same_source(a: &DISPLAYCONFIG_PATH_SOURCE_INFO, b: &DISPLAYCONFIG_PATH_SOURCE_INFO) -> bool {
+    a.adapterId == b.adapterId && a.id == b.id
+}
+
+fn is_active(path: &DISPLAYCONFIG_PATH_INFO) -> bool {
+    path.flags & PATH_ACTIVE != 0
+}
+
+/// Monitors that are plugged in but not part of the desktop, which is what
+/// `monitor set --enabled off` leaves behind. `EnumDisplayMonitors` only sees
+/// the active ones, so without this a disabled monitor would have no id to
+/// enable it with. Its size and refresh rate are its preferred mode, since it
+/// has no current one.
+fn list_detached() -> Vec<MonitorInfo> {
+    let Ok(config) = query_display_config(QDC_ALL_PATHS) else {
+        return Vec::new();
+    };
+    let active: Vec<DISPLAYCONFIG_PATH_TARGET_INFO> =
+        config.paths.iter().filter(|p| is_active(p)).map(|p| p.targetInfo).collect();
+    let mut seen: Vec<DISPLAYCONFIG_PATH_TARGET_INFO> = Vec::new();
+    let mut out = Vec::new();
+    for path in &config.paths {
+        let target = &path.targetInfo;
+        if !target.targetAvailable.as_bool()
+            || active.iter().any(|a| same_target(a, target))
+            || seen.iter().any(|s| same_target(s, target))
+        {
             continue;
         }
-
-        let name_wide = wide(&name);
-        let mut devmode = DEVMODEW::default();
-        devmode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
-        let read_ok = unsafe {
-            EnumDisplaySettingsW(PCWSTR(name_wide.as_ptr()), ENUM_REGISTRY_SETTINGS, &mut devmode)
-        }
-        .as_bool();
-        // Windows reserves many more "\\.\DISPLAYn" adapter slots than are
-        // ever used; an unconfigured phantom slot has no saved geometry at
-        // all, which is how we tell it apart from a monitor someone actually
-        // disabled (which still has its last-known width/height/position).
-        if !read_ok || devmode.dmPelsWidth == 0 || devmode.dmPelsHeight == 0 {
-            continue;
-        }
-        let w = devmode.dmPelsWidth as i32;
-        let h = devmode.dmPelsHeight as i32;
-        let refresh = devmode.dmDisplayFrequency;
-        let pos = unsafe { devmode.Anonymous1.Anonymous2.dmPosition };
-        let (x, y) = (pos.x, pos.y);
-
+        seen.push(*target);
+        let (width, height, refresh_rate) = target_preferred_mode(target).unwrap_or((0, 0, 0));
         out.push(MonitorInfo {
-            id: name.clone(),
-            name,
-            x,
-            y,
-            width: w,
-            height: h,
+            id: target_monitor_id(target),
+            name: target_friendly_name(target).unwrap_or_else(|| "Unknown monitor".to_string()),
+            x: 0,
+            y: 0,
+            width: width as i32,
+            height: height as i32,
             primary: false,
-            refresh_rate: refresh,
+            refresh_rate,
             attached: false,
         });
     }
@@ -137,9 +265,7 @@ pub fn list() -> Result<Vec<MonitorInfo>, CmdError> {
     if !ok.as_bool() {
         return Err(CmdError::os("EnumDisplayMonitors failed"));
     }
-    let attached_names: std::collections::HashSet<String> =
-        monitors.iter().map(|m| m.name.clone()).collect();
-    monitors.extend(list_detached(&attached_names));
+    monitors.extend(list_detached());
     Ok(monitors)
 }
 
@@ -186,8 +312,7 @@ fn wide(name: &str) -> Vec<u16> {
 }
 
 fn read_devmode(device_name: &[u16]) -> Result<DEVMODEW, CmdError> {
-    let mut devmode = DEVMODEW::default();
-    devmode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+    let mut devmode = DEVMODEW { dmSize: std::mem::size_of::<DEVMODEW>() as u16, ..Default::default() };
     let ok = unsafe {
         EnumDisplaySettingsW(PCWSTR(device_name.as_ptr()), ENUM_CURRENT_SETTINGS, &mut devmode)
     };
@@ -226,26 +351,79 @@ fn commit_pending() -> Result<(), CmdError> {
     Ok(())
 }
 
-/// `--enabled on/off` is NOT implemented, despite MSDN documenting
-/// `ChangeDisplaySettingsExW` with a zero-width/height `DEVMODE` as the way
-/// to detach a display (and the converse to reattach one). Live-tested
-/// against 3 real connected monitors on this machine (Windows 11): every
-/// variant - a plain call, the `CDS_NORESET`-batch-then-commit pattern that
-/// fixed `--make-primary`, and that same pattern extended to reassert every
-/// other attached monitor's position too - reported `DISP_CHANGE_SUCCESSFUL`
-/// while changing nothing. The legacy API appears to be silently ignored
-/// for physically-connected displays under this machine's CCD (Connecting
-/// and Configuring Displays) driver stack; actually detaching a display here
-/// most likely needs `SetDisplayConfig`/`QueryDisplayConfig` with an
-/// explicit topology instead, a meaningfully larger piece of work this
-/// wasn't extended to cover.
-fn set_enabled(_id: &str, _enabled: bool, _resolution: Option<&str>, _refresh_rate: Option<u32>) -> Result<(), CmdError> {
-    Err(CmdError::unsupported(
-        "monitor enable/disable isn't implemented: the documented ChangeDisplaySettingsExW \
-         detach mechanism was live-tested on this machine's 3-monitor setup and silently did \
-         nothing (reported success, changed nothing) - likely needs the newer \
-         SetDisplayConfig/QueryDisplayConfig topology API instead",
-    ))
+/// Takes a monitor off the desktop, as Display settings' "Disconnect this
+/// display" does. The older `ChangeDisplaySettingsExW` way of detaching (a
+/// zero-size `DEVMODE`) reported success and changed nothing on a
+/// three-monitor Windows 11 machine, so this uses the CCD API instead.
+fn disable(id: &str) -> Result<(), CmdError> {
+    let monitor = find(id)?;
+    if !monitor.attached {
+        return Ok(());
+    }
+    if monitor.primary {
+        return Err(CmdError::invalid_args(
+            "can't disable the primary monitor; make another one primary first with `monitor set --make-primary`",
+        ));
+    }
+    let config = query_display_config(QDC_ONLY_ACTIVE_PATHS)?;
+    // A monitor that mirrors another shares its source, so they go together.
+    let keep: Vec<DISPLAYCONFIG_PATH_INFO> = config
+        .paths
+        .iter()
+        .filter(|p| source_gdi_name(&p.sourceInfo).as_deref() != Some(monitor.name.as_str()))
+        .copied()
+        .collect();
+    if keep.len() == config.paths.len() {
+        return Err(CmdError::os(format!("could not find the display path for {}", monitor.name)));
+    }
+    if keep.is_empty() {
+        return Err(CmdError::invalid_args("can't disable the only monitor"));
+    }
+    apply_display_config(&keep, &config.modes)
+}
+
+/// Puts a disabled monitor back on the desktop and returns its new id.
+/// Windows picks its mode and position. In testing it placed the monitor to
+/// the right of the others rather than where it was before it was disabled,
+/// so pass `--position` along with `--enabled on` to put it somewhere else.
+fn enable(id: &str) -> Result<String, CmdError> {
+    let monitors = list()?;
+    if monitors.iter().any(|m| m.id == id && m.attached) {
+        return Ok(id.to_string());
+    }
+    let config = query_display_config(QDC_ALL_PATHS)?;
+    let active: Vec<DISPLAYCONFIG_PATH_INFO> = config.paths.iter().filter(|p| is_active(p)).copied().collect();
+    let candidate = config
+        .paths
+        .iter()
+        .filter(|p| !is_active(p) && p.targetInfo.targetAvailable.as_bool())
+        .filter(|p| target_monitor_id(&p.targetInfo) == id)
+        // Each source drives one picture; one already in use would make this
+        // monitor a mirror of another instead of extending the desktop.
+        .find(|p| !active.iter().any(|a| same_source(&a.sourceInfo, &p.sourceInfo)));
+    let Some(candidate) = candidate else {
+        if monitors.iter().any(|m| m.id == id) {
+            return Err(CmdError::os("the graphics adapter has no free output left to drive this monitor"));
+        }
+        return Err(CmdError::not_found(format!(
+            "no disabled monitor with id {id}; `monitor list` shows a disabled monitor's id, which starts with \"target-\""
+        )));
+    };
+
+    let mut path = *candidate;
+    path.flags |= PATH_ACTIVE;
+    path.sourceInfo.Anonymous.modeInfoIdx = MODE_IDX_INVALID;
+    path.targetInfo.Anonymous.modeInfoIdx = MODE_IDX_INVALID;
+    let mut paths = active;
+    paths.push(path);
+    apply_display_config(&paths, &config.modes)?;
+
+    let name = source_gdi_name(&path.sourceInfo);
+    list()?
+        .into_iter()
+        .find(|m| m.attached && Some(&m.name) == name.as_ref())
+        .map(|m| m.id)
+        .ok_or_else(|| CmdError::os("Windows accepted the new layout, but the monitor didn't come on"))
 }
 
 /// Applies resolution/refresh-rate/rotation/position/primary changes via the
@@ -274,7 +452,22 @@ pub fn set(
     enabled: Option<bool>,
 ) -> Result<(), CmdError> {
     if let Some(enabled) = enabled {
-        return set_enabled(id, enabled, resolution, refresh_rate);
+        let other_settings = resolution.is_some()
+            || refresh_rate.is_some()
+            || rotation.is_some()
+            || position.is_some()
+            || make_primary;
+        if !enabled {
+            if other_settings {
+                return Err(CmdError::invalid_args("--enabled off can't be combined with other settings"));
+            }
+            return disable(id);
+        }
+        let new_id = enable(id)?;
+        if !other_settings {
+            return Ok(());
+        }
+        return set(&new_id, resolution, refresh_rate, rotation, position, make_primary, None);
     }
 
     let target = find(id)?;
@@ -358,8 +551,49 @@ pub fn set(
     apply_devmode(&device_name, &devmode, CDS_UPDATEREGISTRY)
 }
 
-pub fn power(_id: &str, _on: bool) -> Result<(), CmdError> {
-    Err(CmdError::unsupported(
-        "per-monitor power control needs a DDC/CI VCP write (code 0xD6) whose on/standby/off value mapping varies enough by panel that it isn't safe to ship unverified; not implemented",
-    ))
+/// MCCS VCP code 0xD6, "Power Mode".
+const VCP_POWER_MODE: u8 = 0xD6;
+/// MCCS power mode values. 0x04 is DPMS off, which keeps the panel's DDC/CI
+/// listening so 0x01 can wake it again. 0x05 (hard power off) is avoided on
+/// purpose: many panels stop answering DDC/CI in it and only wake from their
+/// own power button.
+const POWER_ON: u32 = 0x01;
+const POWER_OFF: u32 = 0x04;
+
+/// Switches one monitor's panel on or off over DDC/CI. The monitor stays
+/// attached to the desktop, so windows don't move and its id doesn't change.
+pub fn power(id: &str, on: bool) -> Result<(), CmdError> {
+    use super::brightness::{parse_monitor_id, PhysicalMonitor};
+    use windows::Win32::Devices::Display::{GetVCPFeatureAndVCPFeatureReply, SetVCPFeature};
+
+    let monitor = find(id)?;
+    if !monitor.attached {
+        return Err(CmdError::invalid_args(format!(
+            "monitor {id} is disabled; enable it with `monitor set {id} --enabled on` instead"
+        )));
+    }
+    let physical = PhysicalMonitor::open(parse_monitor_id(id)?)?;
+
+    // Read the power mode first, so a monitor without DDC/CI, or with it
+    // switched off in its own menu, gets a clear error instead of a write
+    // that silently does nothing.
+    let mut current = 0u32;
+    let ok = unsafe {
+        GetVCPFeatureAndVCPFeatureReply(physical.handle(), VCP_POWER_MODE, None, &mut current, None)
+    };
+    if ok == 0 {
+        return Err(CmdError::unsupported(
+            "the monitor didn't answer a DDC/CI power mode query; it may not support DDC/CI, or DDC/CI may be switched off in the monitor's own menu",
+        ));
+    }
+
+    let target = if on { POWER_ON } else { POWER_OFF };
+    if current == target {
+        return Ok(());
+    }
+    let ok = unsafe { SetVCPFeature(physical.handle(), VCP_POWER_MODE, target) };
+    if ok == 0 {
+        return Err(CmdError::os("the monitor refused the DDC/CI power mode change"));
+    }
+    Ok(())
 }
