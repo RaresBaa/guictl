@@ -79,3 +79,7 @@ pub const GUIDE: &str = r#"ON THIS SYSTEM (Windows)
   when ticked, and a control that draws itself reports nothing (it may list
   as a plain pane). Take a screenshot to see its state.
 "#;
+
+pub fn guide() -> String {
+    GUIDE.to_string()
+}

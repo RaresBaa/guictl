@@ -1,3 +1,4 @@
+use super::gnome;
 use super::kwin::{self, js_str};
 use super::window::WindowHandle;
 use crate::output::CmdError;
@@ -5,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct WorkspaceInfo {
-    /// KWin's UUID for the virtual desktop.
+    /// KWin's UUID for the virtual desktop; on GNOME, which gives workspaces
+    /// no id, its 1-based position.
     pub id: String,
     pub name: String,
     /// 1-based position, as shown in the pager.
@@ -30,10 +32,22 @@ function describe(d) {
 "#;
 
 fn parse<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, CmdError> {
-    serde_json::from_value(value).map_err(|e| CmdError::os(format!("unexpected workspace data from KWin: {e}")))
+    serde_json::from_value(value)
+        .map_err(|e| CmdError::os(format!("unexpected workspace data from the window manager: {e}")))
+}
+
+fn gnome_action(action: &str, args: serde_json::Value) -> Result<serde_json::Value, CmdError> {
+    let mut all = serde_json::json!({ "action": action });
+    if let (Some(all), serde_json::Value::Object(args)) = (all.as_object_mut(), args) {
+        all.extend(args);
+    }
+    gnome::call("workspace", all)
 }
 
 pub fn list() -> Result<Vec<WorkspaceInfo>, CmdError> {
+    if gnome::is_gnome() {
+        return parse(gnome_action("list", serde_json::Value::Null)?);
+    }
     parse(kwin::run(&format!("{DESCRIBE}\nreturn workspace.desktops.map(describe);"))?)
 }
 
@@ -42,11 +56,20 @@ pub fn remove(id: &str) -> Result<(), CmdError> {
     if list()?.len() == 1 {
         return Err(CmdError::invalid_args("can't remove the only workspace"));
     }
+    if gnome::is_gnome() {
+        return gnome_action("remove", serde_json::json!({ "id": id })).map(|_| ());
+    }
     kwin::run(&format!("{PRELUDE}\nworkspace.removeDesktop(findDesktop({}));", js_str(id))).map(|_| ())
 }
 
 /// Given an empty name, KWin calls the desktop "Desktop N" itself.
+/// GNOME's names live in a setting, "Workspace N" when unset. With dynamic
+/// workspaces (GNOME's default) the empty one it keeps at the end is the
+/// new workspace.
 pub fn create(name: Option<&str>) -> Result<WorkspaceInfo, CmdError> {
+    if gnome::is_gnome() {
+        return parse(gnome_action("create", serde_json::json!({ "name": name.unwrap_or("") }))?);
+    }
     parse(kwin::run(&format!(
         "{DESCRIBE}\nvar at = workspace.desktops.length;\nworkspace.createDesktop(at, {});\nreturn describe(workspace.desktops[at]);",
         js_str(name.unwrap_or(""))
@@ -55,10 +78,20 @@ pub fn create(name: Option<&str>) -> Result<WorkspaceInfo, CmdError> {
 
 /// `id` is a workspace id from `list`, or its 1-based index.
 pub fn switch(id: &str) -> Result<(), CmdError> {
+    if gnome::is_gnome() {
+        return gnome_action("switch", serde_json::json!({ "id": id })).map(|_| ());
+    }
     kwin::run(&format!("{PRELUDE}\nworkspace.currentDesktop = findDesktop({});", js_str(id))).map(|_| ())
 }
 
 pub fn send_window(window: WindowHandle, id: &str) -> Result<(), CmdError> {
+    if gnome::is_gnome() {
+        return gnome::call(
+            "window",
+            serde_json::json!({ "id": super::window::format_id(window), "action": "send", "workspace": id }),
+        )
+        .map(|_| ());
+    }
     super::window::with_window(
         window,
         &format!("{PRELUDE}\nw.desktops = [findDesktop({})];", js_str(id)),

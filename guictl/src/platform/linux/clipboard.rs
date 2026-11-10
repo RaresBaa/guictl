@@ -1,4 +1,4 @@
-use super::dbus;
+use super::{dbus, gnome};
 use crate::output::CmdError;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -17,7 +17,13 @@ fn klipper_err(e: zbus::Error) -> CmdError {
 /// clipboard contents belong to the process that set them and vanish
 /// when it exits, which a one-off command can't work with. Klipper owns the
 /// contents on our behalf.
+///
+/// On GNOME the shell owns them, through guictl's extension.
 pub fn get_text() -> Result<String, CmdError> {
+    if gnome::is_gnome() {
+        return gnome::call("clipboard", serde_json::json!({ "action": "get_text" }))
+            .map(|v| v.as_str().unwrap_or_default().to_string());
+    }
     dbus::session()?
         .call_method(Some(SERVICE), PATH, Some(INTERFACE), "getClipboardContents", &())
         .and_then(|reply| reply.body().deserialize())
@@ -25,6 +31,9 @@ pub fn get_text() -> Result<String, CmdError> {
 }
 
 pub fn set_text(text: &str) -> Result<(), CmdError> {
+    if gnome::is_gnome() {
+        return gnome::call("clipboard", serde_json::json!({ "action": "set_text", "text": text })).map(|_| ());
+    }
     dbus::session()?
         .call_method(Some(SERVICE), PATH, Some(INTERFACE), "setClipboardContents", &(text,))
         .map(|_| ())
@@ -47,6 +56,15 @@ fn missing(tool: &str, e: std::io::Error) -> CmdError {
 
 /// Saves the clipboard's image to `path`, in the format its extension asks for.
 pub fn get_image(path: &str) -> Result<(), CmdError> {
+    if gnome::is_gnome() {
+        let file = gnome::TempFile::new("clipboard");
+        gnome::call("clipboard", serde_json::json!({ "action": "get_image", "path": file.path() }))?;
+        let data = std::fs::read(&file.0).map_err(|e| CmdError::os(format!("could not read the clipboard image: {e}")))?;
+        return image::load_from_memory(&data)
+            .map_err(|e| CmdError::os(format!("could not decode the clipboard image: {e}")))?
+            .save(path)
+            .map_err(|e| CmdError::os(e.to_string()));
+    }
     let types = wl_clipboard("wl-paste")
         .arg("--list-types")
         .output()
@@ -80,6 +98,12 @@ pub fn set_image(path: &str) -> Result<(), CmdError> {
     let mut png = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .map_err(|e| CmdError::os(e.to_string()))?;
+
+    if gnome::is_gnome() {
+        let file = gnome::TempFile::new("clipboard.png");
+        std::fs::write(&file.0, &png).map_err(|e| CmdError::os(format!("could not write {}: {e}", file.path())))?;
+        return gnome::call("clipboard", serde_json::json!({ "action": "set_image", "path": file.path() })).map(|_| ());
+    }
 
     let mut child = wl_clipboard("wl-copy")
         .args(["--type", "image/png"])

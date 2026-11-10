@@ -1,8 +1,9 @@
 //! `guictl setup`: the two one-time permissions Plasma asks for, done in
 //! one go so nobody has to write a .desktop file by hand, and the
-//! "Remote Control Started" popup switched off.
+//! "Remote Control Started" popup switched off. On GNOME: guictl's Shell
+//! extension installed and enabled, and the input permission asked for.
 
-use super::{dbus, portal, screenshot};
+use super::{dbus, gnome, portal, screenshot};
 use crate::output::CmdError;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -88,7 +89,34 @@ fn silence_remote_control_popup() -> Result<(), CmdError> {
         .map_err(dbus::err)
 }
 
+fn run_gnome() -> Result<Value, CmdError> {
+    let (state, dir) = gnome::install()?;
+    // Starting an input session is what makes GNOME show its consent
+    // dialog; with a stored token it just succeeds.
+    portal::session()?;
+    let (extension, note) = match state {
+        gnome::InstallState::Active => ("active", None),
+        gnome::InstallState::NeedsLogin => (
+            "needs_login",
+            Some("guictl's GNOME Shell extension is installed and enabled, but GNOME Shell loads extensions only at login: log out and back in once before using window, workspace, screenshot, ocr, clipboard or mouse commands."),
+        ),
+    };
+    let mut out = json!({
+        "ok": true,
+        "extension": extension,
+        "input": "authorized",
+        "extension_dir": dir,
+    });
+    if let Some(note) = note {
+        out["note"] = Value::from(note);
+    }
+    Ok(out)
+}
+
 pub fn run() -> Result<Value, CmdError> {
+    if gnome::is_gnome() {
+        return run_gnome();
+    }
     let desktop_file = authorize_screenshots()?;
     silence_remote_control_popup()?;
     // Starting an input session is what makes Plasma show its consent

@@ -1,11 +1,13 @@
+use super::gnome;
 use super::kwin::{self, js_str};
 use crate::cli::WindowState;
 use crate::output::CmdError;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-/// KWin's internal window UUID. Kept as a number rather than a string so the
-/// handle is `Copy`, like `HWND` on Windows.
+/// KWin's internal window UUID, or Mutter's numeric window id on GNOME. Kept
+/// as a number rather than a string so the handle is `Copy`, like `HWND` on
+/// Windows.
 pub type WindowHandle = u128;
 
 #[derive(Serialize)]
@@ -60,6 +62,88 @@ struct RawWindow {
     modal: bool,
     #[serde(default)]
     unresponsive: bool,
+}
+
+/// A window as guictl's GNOME Shell extension describes it.
+#[derive(Deserialize)]
+struct GnomeWindow {
+    id: String,
+    title: String,
+    class: String,
+    pid: i64,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    bx: i32,
+    by: i32,
+    bw: i32,
+    bh: i32,
+    state: String,
+    monitor_x: Option<i32>,
+    monitor_y: Option<i32>,
+    z: i64,
+    listed: bool,
+    active: bool,
+    owner: String,
+    modal: bool,
+}
+
+impl GnomeWindow {
+    /// The shell knows a monitor by its place on the desktop, the monitor
+    /// list by its connector.
+    fn into_raw(self, monitors: &[super::monitor::MonitorInfo]) -> RawWindow {
+        let monitor = monitors
+            .iter()
+            .find(|m| m.attached && Some(m.x) == self.monitor_x && Some(m.y) == self.monitor_y)
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        RawWindow {
+            id: self.id,
+            title: self.title,
+            class: self.class,
+            pid: self.pid,
+            x: self.x,
+            y: self.y,
+            w: self.w,
+            h: self.h,
+            state: self.state,
+            monitor,
+            z: self.z,
+            listed: self.listed,
+            active: self.active,
+            owner: self.owner,
+            modal: self.modal,
+            unresponsive: false,
+        }
+    }
+}
+
+fn gnome_windows() -> Result<Vec<RawWindow>, CmdError> {
+    let raw: Vec<GnomeWindow> = parse(gnome::call("windows", serde_json::json!({}))?)?;
+    let monitors = super::monitor::list().unwrap_or_default();
+    Ok(raw.into_iter().map(|w| w.into_raw(&monitors)).collect())
+}
+
+/// Runs one of the extension's window actions, with `extra` as its arguments.
+fn gnome_action(handle: WindowHandle, action: &str, extra: serde_json::Value) -> Result<serde_json::Value, CmdError> {
+    let mut args = serde_json::json!({ "id": format_id(handle), "action": action });
+    if let (Some(args), serde_json::Value::Object(extra)) = (args.as_object_mut(), extra) {
+        args.extend(extra);
+    }
+    gnome::call("window", args)
+}
+
+fn gnome_describe(handle: WindowHandle) -> Result<GnomeWindow, CmdError> {
+    parse(gnome_action(handle, "describe", serde_json::Value::Null)?)
+}
+
+/// The window's current state, through whichever desktop runs it.
+fn describe(handle: WindowHandle) -> Result<RawWindow, CmdError> {
+    if gnome::is_gnome() {
+        return Ok(gnome_describe(handle)?.into_raw(&[]));
+    }
+    parse(with_window(handle, "return describe(w);")?)
 }
 
 const PRELUDE: &str = r#"
@@ -138,7 +222,7 @@ fn window_info(raw: RawWindow) -> WindowInfo {
 
 fn parse<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, CmdError> {
     serde_json::from_value(value)
-        .map_err(|e| CmdError::os(format!("unexpected window data from KWin: {e}")))
+        .map_err(|e| CmdError::os(format!("unexpected window data from the window manager: {e}")))
 }
 
 fn matches_app(w: &WindowInfo, app: &str) -> bool {
@@ -149,8 +233,11 @@ fn matches_app(w: &WindowInfo, app: &str) -> bool {
 /// With `include_active`, the active window is included even if it isn't a
 /// listable kind.
 fn snapshot(include_active: bool) -> Result<Vec<(WindowInfo, bool)>, CmdError> {
-    let value = kwin::run(&format!("{PRELUDE}\nreturn workspace.windowList().map(describe);"))?;
-    let mut raw: Vec<RawWindow> = parse(value)?;
+    let mut raw: Vec<RawWindow> = if gnome::is_gnome() {
+        gnome_windows()?
+    } else {
+        parse(kwin::run(&format!("{PRELUDE}\nreturn workspace.windowList().map(describe);"))?)?
+    };
     let blocked: Vec<String> = raw.iter().filter(|w| w.modal && !w.owner.is_empty()).map(|w| w.owner.clone()).collect();
     raw.retain(|w| w.listed || (include_active && w.active));
     raw.sort_by_key(|w| std::cmp::Reverse(w.z));
@@ -185,6 +272,24 @@ pub fn active() -> Result<WindowInfo, CmdError> {
 }
 
 pub(crate) fn parse_id(id: &str) -> Result<WindowHandle, CmdError> {
+    if gnome::is_gnome() {
+        return id
+            .trim()
+            .parse::<u64>()
+            .map(WindowHandle::from)
+            .map_err(|_| CmdError::invalid_args(format!("invalid window id: {id}")));
+    }
+    parse_uuid(id)
+}
+
+pub(crate) fn format_id(handle: WindowHandle) -> String {
+    if gnome::is_gnome() {
+        return handle.to_string();
+    }
+    format_uuid(handle)
+}
+
+fn parse_uuid(id: &str) -> Result<WindowHandle, CmdError> {
     let hex: String = id.chars().filter(|c| !matches!(c, '{' | '}' | '-')).collect();
     if hex.len() != 32 {
         return Err(CmdError::invalid_args(format!("invalid window id: {id}")));
@@ -193,7 +298,7 @@ pub(crate) fn parse_id(id: &str) -> Result<WindowHandle, CmdError> {
         .map_err(|_| CmdError::invalid_args(format!("invalid window id: {id}")))
 }
 
-pub(crate) fn format_id(handle: WindowHandle) -> String {
+fn format_uuid(handle: WindowHandle) -> String {
     let s = format!("{handle:032x}");
     format!("{}-{}-{}-{}-{}", &s[0..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])
 }
@@ -235,7 +340,7 @@ pub(super) fn with_window(handle: WindowHandle, action: &str) -> Result<serde_js
 }
 
 pub fn rect(handle: WindowHandle) -> Result<(i32, i32, i32, i32), CmdError> {
-    let raw: RawWindow = parse(with_window(handle, "return describe(w);")?)?;
+    let raw = describe(handle)?;
     Ok((raw.x, raw.y, raw.w, raw.h))
 }
 
@@ -260,6 +365,15 @@ pub(super) struct WithPopups {
 /// Under XWayland a popup names no owner, so it goes with its process's active
 /// window: the one a person must be using for a menu to stay open.
 pub(super) fn with_popups(handle: WindowHandle) -> Result<WithPopups, CmdError> {
+    if gnome::is_gnome() {
+        #[derive(Deserialize)]
+        struct Reply {
+            window: Popup,
+            popups: Vec<Popup>,
+        }
+        let reply: Reply = parse(gnome_action(handle, "popups", serde_json::Value::Null)?)?;
+        return Ok(WithPopups { x: reply.window.x, y: reply.window.y, popups: reply.popups });
+    }
     parse(with_window(
         handle,
         r#"var popups = [], order = workspace.stackingOrder;
@@ -294,6 +408,21 @@ pub(super) struct ClientArea {
 /// own title bar and shadow (GTK, Firefox) the surface reaches past the frame;
 /// for one KWin decorates it's the contents without title bar and borders.
 pub(super) fn client_area(handle: WindowHandle) -> Result<ClientArea, CmdError> {
+    if gnome::is_gnome() {
+        let w = gnome_describe(handle)?;
+        return Ok(ClientArea {
+            pid: u32::try_from(w.pid).unwrap_or(0),
+            title: w.title,
+            x: w.bx,
+            y: w.by,
+            w: w.bw,
+            h: w.bh,
+            frame_x: w.x,
+            frame_y: w.y,
+            frame_w: w.w,
+            frame_h: w.h,
+        });
+    }
     parse(with_window(
         handle,
         "var b = w.bufferGeometry;
@@ -306,6 +435,9 @@ return { pid: w.pid, title: w.caption, x: Math.round(b.x), y: Math.round(b.y),
 }
 
 pub fn focus(handle: WindowHandle) -> Result<(), CmdError> {
+    if gnome::is_gnome() {
+        return gnome_action(handle, "focus", serde_json::Value::Null).map(|_| ());
+    }
     with_window(handle, "w.minimized = false;\nworkspace.activeWindow = w;").map(|_| ())
 }
 
@@ -314,8 +446,7 @@ pub fn focus(handle: WindowHandle) -> Result<(), CmdError> {
 /// alone keeps a menu open in it from closing.
 pub(super) fn bring_forward(handle: WindowHandle) -> Result<(), CmdError> {
     let ready = |w: &RawWindow| w.active && w.state != "minimized";
-    let raw: RawWindow = parse(with_window(handle, "return describe(w);")?)?;
-    if ready(&raw) {
+    if ready(&describe(handle)?) {
         return Ok(());
     }
     focus(handle)?;
@@ -334,8 +465,7 @@ const SETTLE_TIMEOUT: Duration = Duration::from_millis(1000);
 fn settle(handle: WindowHandle, done: impl Fn(&RawWindow) -> bool) -> Result<(), CmdError> {
     let start = Instant::now();
     loop {
-        let raw: RawWindow = parse(with_window(handle, "return describe(w);")?)?;
-        if done(&raw) || start.elapsed() >= SETTLE_TIMEOUT {
+        if done(&describe(handle)?) || start.elapsed() >= SETTLE_TIMEOUT {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(25));
@@ -343,6 +473,10 @@ fn settle(handle: WindowHandle, done: impl Fn(&RawWindow) -> bool) -> Result<(),
 }
 
 pub fn move_window(handle: WindowHandle, x: i32, y: i32) -> Result<(), CmdError> {
+    if gnome::is_gnome() {
+        gnome_action(handle, "move", serde_json::json!({ "x": x, "y": y }))?;
+        return settle(handle, |w| (w.x, w.y) == (x, y));
+    }
     with_window(
         handle,
         &format!(
@@ -353,6 +487,10 @@ pub fn move_window(handle: WindowHandle, x: i32, y: i32) -> Result<(), CmdError>
 }
 
 pub fn resize_window(handle: WindowHandle, w: i32, h: i32) -> Result<(), CmdError> {
+    if gnome::is_gnome() {
+        gnome_action(handle, "resize", serde_json::json!({ "w": w, "h": h }))?;
+        return settle(handle, |raw| (raw.w, raw.h) == (w, h));
+    }
     with_window(
         handle,
         &format!(
@@ -371,11 +509,24 @@ pub fn set_state(handle: WindowHandle, state: WindowState) -> Result<(), CmdErro
         }
         WindowState::Fullscreen => ("w.minimized = false;\nw.fullScreen = true;", "fullscreen"),
     };
-    with_window(handle, action)?;
+    if gnome::is_gnome() {
+        let name = match state {
+            WindowState::Minimize => "minimize",
+            WindowState::Maximize => "maximize",
+            WindowState::Restore => "restore",
+            WindowState::Fullscreen => "fullscreen",
+        };
+        gnome_action(handle, name, serde_json::Value::Null)?;
+    } else {
+        with_window(handle, action)?;
+    }
     settle(handle, |w| w.state == reached)
 }
 
 pub fn close(handle: WindowHandle) -> Result<(), CmdError> {
+    if gnome::is_gnome() {
+        return gnome_action(handle, "close", serde_json::Value::Null).map(|_| ());
+    }
     with_window(handle, "w.closeWindow();").map(|_| ())
 }
 
@@ -383,7 +534,7 @@ pub fn close(handle: WindowHandle) -> Result<(), CmdError> {
 pub fn kill(handle: WindowHandle) -> Result<u32, CmdError> {
     let pid = client_area(handle)?.pid;
     if pid == 0 {
-        return Err(CmdError::not_found("KWin doesn't know this window's process"));
+        return Err(CmdError::not_found("the window manager doesn't know this window's process"));
     }
     let output = std::process::Command::new("kill")
         .args(["-KILL", &pid.to_string()])
@@ -399,6 +550,9 @@ pub fn kill(handle: WindowHandle) -> Result<u32, CmdError> {
 }
 
 pub fn pin(handle: WindowHandle, on: bool) -> Result<(), CmdError> {
+    if gnome::is_gnome() {
+        return gnome_action(handle, "pin", serde_json::json!({ "on": on })).map(|_| ());
+    }
     with_window(handle, &format!("w.keepAbove = {on};")).map(|_| ())
 }
 
@@ -409,17 +563,17 @@ mod tests {
     #[test]
     fn window_ids_round_trip() {
         let id = "904e1e2e-24e9-440b-b822-93fd437caadf";
-        assert_eq!(format_id(parse_id(id).unwrap()), id);
+        assert_eq!(format_uuid(parse_uuid(id).unwrap()), id);
         // KWin prints them in braces; leading zeros must survive.
         let braced = "{00000000-0000-0000-0000-00000000002a}";
-        assert_eq!(parse_id(braced).unwrap(), 42);
-        assert_eq!(format_id(42), "00000000-0000-0000-0000-00000000002a");
+        assert_eq!(parse_uuid(braced).unwrap(), 42);
+        assert_eq!(format_uuid(42), "00000000-0000-0000-0000-00000000002a");
     }
 
     #[test]
     fn bad_window_ids_are_invalid_args() {
         for id in ["", "bogus", "0x1a2b", "904e1e2e-24e9-440b-b822-93fd437caad", "zz4e1e2e-24e9-440b-b822-93fd437caadf"] {
-            assert_eq!(parse_id(id).unwrap_err().code, "invalid_args", "{id}");
+            assert_eq!(parse_uuid(id).unwrap_err().code, "invalid_args", "{id}");
         }
     }
 

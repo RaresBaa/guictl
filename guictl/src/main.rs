@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod guide;
+mod mcp;
 mod output;
 mod platform;
 

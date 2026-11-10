@@ -40,6 +40,7 @@ jobs:
           dir="guictl-$GITHUB_REF_NAME-${{ matrix.name }}"
           mkdir "$dir"
           cp README.md LICENSE "$dir"
+          cp -r skills "$dir"
           if [ "$RUNNER_OS" = Windows ]; then
             cp target/release/guictl.exe "$dir"
             7z a "$dir.zip" "$dir"

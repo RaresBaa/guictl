@@ -64,6 +64,7 @@ pub fn dispatch(command: Command) -> CmdResult {
             let created = os::workspace::create(name.as_deref())?;
             Ok(serde_json::to_value(created).unwrap())
         }
+        Command::Mcp(cmd) => crate::mcp::run(cmd),
     }
 }
 
@@ -287,7 +288,8 @@ fn window(cmd: WindowCmd) -> CmdResult {
     }
 }
 
-fn screenshot(args: ScreenshotArgs) -> CmdResult {
+/// Takes the picture `screenshot` asks for, without deciding where it goes.
+pub(crate) fn capture(args: &ScreenshotArgs) -> Result<crate::platform::Screenshot, CmdError> {
     let element_region = match args.element.as_deref() {
         Some(id) => {
             let (x, y, w, h) = os::element::rect(id)?;
@@ -298,14 +300,18 @@ fn screenshot(args: ScreenshotArgs) -> CmdResult {
         }
         None => None,
     };
-    let (width, height, bytes, origin) = os::screenshot::take(
+    os::screenshot::take(
         args.monitor.as_deref(),
         args.window.as_deref(),
         element_region.as_deref().or(args.region.as_deref()),
         args.scale,
         args.cursor,
         args.grid,
-    )?;
+    )
+}
+
+fn screenshot(args: ScreenshotArgs) -> CmdResult {
+    let (width, height, bytes, origin) = capture(&args)?;
     match args.output.as_deref() {
         Some("-") => {
             use std::io::Write;
@@ -566,7 +572,13 @@ fn launch(args: LaunchArgs) -> CmdResult {
         }
         windows = now;
     }
-    Ok(json!({ "pid": pid, "window": first, "windows": windows }))
+    // The first sighting can predate the window's first frame (GNOME lists
+    // it at 0,0 with no size then), so report its latest state.
+    let window = match windows.iter().find(|w| w.id == first.id) {
+        Some(latest) => json!(latest),
+        None => json!(first),
+    };
+    Ok(json!({ "pid": pid, "window": window, "windows": windows }))
 }
 
 fn system(cmd: SystemCmd) -> CmdResult {
@@ -780,10 +792,10 @@ fn picture_hash(monitor: Option<&str>, window: Option<&str>, region: Option<&str
 }
 
 /// Batch file format: a JSON array of argv arrays, one per command, e.g.
-/// `[["mouse", "click", "100", "200"], ["keyboard", "type", "hi"]]`. Each
-/// step runs even if an earlier one failed; the response reports every
-/// step's outcome rather than aborting on the first error, since a partial
-/// batch with no record of what happened is worse than a full report.
+/// `[["mouse", "click", "100", "200"], ["keyboard", "type", "hi"]]`. The
+/// batch stops at the first step that fails; the response still lists every
+/// step, the ones after the failure with code "skipped", so the caller knows
+/// exactly what ran.
 fn batch(args: BatchArgs) -> CmdResult {
     let watch = if args.stop_on_user_input { Some(os::input::watch()?) } else { None };
     if args.lines {
@@ -806,7 +818,7 @@ fn batch(args: BatchArgs) -> CmdResult {
     Ok(run_steps(steps, watch.as_ref()))
 }
 
-fn parse_step(argv: &[String]) -> Result<Cli, CmdError> {
+pub(crate) fn parse_step(argv: &[String]) -> Result<Cli, CmdError> {
     let cli = Cli::try_parse_from(std::iter::once("guictl").chain(argv.iter().map(String::as_str)))
         .map_err(|e| CmdError::invalid_args(e.to_string()))?;
     #[cfg(all(windows, not(guictl_stub)))]
@@ -816,11 +828,24 @@ fn parse_step(argv: &[String]) -> Result<Cli, CmdError> {
     Ok(cli)
 }
 
-fn run_steps(steps: Vec<Vec<String>>, watch: Option<&os::input::Watch>) -> serde_json::Value {
+pub(crate) fn run_steps(steps: Vec<Vec<String>>, watch: Option<&os::input::Watch>) -> serde_json::Value {
     let mut results = Vec::with_capacity(steps.len());
     let mut all_ok = true;
     let mut interrupted = false;
+    let mut failed_step = None;
     for (i, argv) in steps.iter().enumerate() {
+        // The steps after a failed one usually depend on it (focus, then
+        // type), so they are listed as skipped instead of run.
+        if let Some(failed) = failed_step {
+            results.push(json!({
+                "args": argv,
+                "outcome": { "ok": false, "error": {
+                    "code": "skipped",
+                    "message": format!("not run: step {} failed", failed + 1),
+                }},
+            }));
+            continue;
+        }
         if !interrupted && watch.is_some_and(|w| w.take()) {
             interrupted = true;
         }
@@ -839,12 +864,20 @@ fn run_steps(steps: Vec<Vec<String>>, watch: Option<&os::input::Watch>) -> serde
             }
             parse_step(argv).and_then(|cli| dispatch(cli.command))
         };
-        all_ok &= outcome.is_ok();
+        if outcome.is_err() {
+            all_ok = false;
+            if !interrupted {
+                failed_step = Some(i);
+            }
+        }
         results.push(json!({ "args": argv, "outcome": outcome_json(outcome) }));
     }
     let mut out = json!({ "results": results, "all_ok": all_ok });
     if interrupted {
         out["interrupted"] = json!(true);
+    }
+    if let Some(failed) = failed_step {
+        out["failed_step"] = json!(failed + 1);
     }
     out
 }

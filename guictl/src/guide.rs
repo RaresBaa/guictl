@@ -126,7 +126,8 @@ SEVERAL STEPS AT ONCE
 - `guictl batch` reads a JSON array of argument lists on stdin and runs them
   in order in one call:
     [["window","focus","--app","kwrite"],["keyboard","type","hello"]]
-  Every step runs even if an earlier one failed; check "all_ok".
+  It stops at the first step that fails: "all_ok" is false, "failed_step"
+  gives its number (from 1), and the steps after it show code "skipped".
 - For a long run, `batch --lines` keeps one guictl running: write one
   argument list (or a list of them) per line to its stdin and read one JSON
   answer per line back.
@@ -165,7 +166,7 @@ BE CAREFUL
 "#;
 
 pub fn text() -> String {
-    format!("{COMMON}\n{}", os::GUIDE)
+    format!("{COMMON}\n{}", os::guide())
 }
 
 #[cfg(test)]

@@ -77,7 +77,7 @@ pub enum Command {
     Capabilities,
     /// How to use guictl well: read this first if you are an AI agent
     Guide,
-    /// Grant the one-time permissions the desktop asks for; run once after installing
+    /// Run once after installing: grants the desktop's one-time permissions on Linux, adds guictl to PATH on Windows
     Setup,
     /// Wait for a window, element, or idle screen
     #[command(subcommand)]
@@ -88,6 +88,9 @@ pub enum Command {
     Ocr(OcrArgs),
     /// Choose an item from a window's menu bar, opening each submenu on the way
     Menu(MenuArgs),
+    /// Serve guictl to AI clients over MCP (HTTP on 127.0.0.1), in the background
+    #[command(subcommand)]
+    Mcp(McpCmd),
 }
 
 /// Parses a pixel coordinate. Positions computed from scaled screenshots or
@@ -723,6 +726,27 @@ pub struct LaunchArgs {
     /// How long --wait-window waits, in milliseconds [default: 5000]
     #[arg(long, value_name = "MS")]
     pub timeout: Option<u64>,
+}
+
+// ---- mcp ----
+
+#[derive(Subcommand)]
+pub enum McpCmd {
+    /// Start the MCP server in the background and print its URL; it runs until `guictl mcp stop`
+    Start(McpServeArgs),
+    /// Stop the MCP server started by `guictl mcp start`
+    Stop,
+    /// Tell whether the MCP server is running, and at which URL
+    Status,
+    /// Run the MCP server in this terminal until it is stopped (what `start` runs in the background)
+    Serve(McpServeArgs),
+}
+
+#[derive(Args)]
+pub struct McpServeArgs {
+    /// Port to listen on; the server only accepts connections from this computer (127.0.0.1)
+    #[arg(long, default_value_t = 47800)]
+    pub port: u16,
 }
 
 // ---- agent-specific ----

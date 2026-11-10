@@ -1,5 +1,5 @@
 //! Input injection through `org.freedesktop.portal.RemoteDesktop`. The first
-//! use shows Plasma's consent dialog; the restore token it hands back is
+//! use shows the desktop's consent dialog; the restore token it hands back is
 //! saved so later commands start a session without asking again. That
 //! consent is a deliberate security boundary, not something to route around.
 
@@ -8,7 +8,8 @@ use crate::output::CmdError;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zbus::blocking::{Connection, MessageIterator};
 use zbus::zvariant::{DynamicType, ObjectPath, OwnedObjectPath, OwnedValue, Value};
@@ -33,19 +34,30 @@ type Response = (String, u32, Results);
 pub struct Session {
     conn: Connection,
     handle: OwnedObjectPath,
+    /// Set once a call on this session fails, so the next use starts anew.
+    dead: AtomicBool,
 }
 
 /// One session per process, so the steps of a `batch` share it. The session
-/// ends when the process exits, and KWin releases anything still held then -
-/// a key or button can only stay down across steps of one batch.
-static SESSION: OnceLock<Session> = OnceLock::new();
+/// ends when the process exits, and the compositor releases anything still held then -
+/// a key or button can only stay down across steps of one batch (or, in the
+/// MCP server, until the server stops).
+///
+/// A long-lived process can outlive its session: the person can end it from
+/// the desktop's remote-control indicator, or xdg-desktop-portal can restart.
+/// The portal then answers "Invalid session", and a fresh one is started.
+static SESSION: Mutex<Option<Arc<Session>>> = Mutex::new(None);
 
-pub fn session() -> Result<&'static Session, CmdError> {
-    if let Some(session) = SESSION.get() {
-        return Ok(session);
+pub fn session() -> Result<Arc<Session>, CmdError> {
+    let mut slot = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(session) = slot.as_ref().filter(|s| !s.dead.load(Ordering::SeqCst)) {
+        return Ok(session.clone());
     }
-    let session = start()?;
-    Ok(SESSION.get_or_init(|| session))
+    // Dropping the old one closes its connection, and with it the session.
+    *slot = None;
+    let session = Arc::new(start()?);
+    *slot = Some(session.clone());
+    Ok(session)
 }
 
 fn token_path() -> PathBuf {
@@ -58,7 +70,7 @@ fn token_path() -> PathBuf {
 
 fn portal_err(e: zbus::Error) -> CmdError {
     CmdError::unsupported(format!(
-        "the RemoteDesktop portal is not available (xdg-desktop-portal and xdg-desktop-portal-kde need to be installed and running): {e}"
+        "the RemoteDesktop portal is not available (xdg-desktop-portal and the desktop's backend for it, xdg-desktop-portal-kde or xdg-desktop-portal-gnome, need to be installed and running): {e}"
     ))
 }
 
@@ -80,7 +92,7 @@ fn request<B: serde::Serialize + DynamicType>(
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let (path, code, results) = responses.recv_timeout(remaining).map_err(|_| {
             CmdError::permission_denied(
-                "timed out waiting for the remote-control request to be approved; accept Plasma's \"Remote control\" dialog and run the command again",
+                "timed out waiting for the remote-control request to be approved; accept the desktop's remote control (\"Remote control\" on Plasma, \"Remote Desktop\" on GNOME) dialog and run the command again",
             )
         })?;
         if path != request_path.as_str() {
@@ -157,15 +169,29 @@ fn start() -> Result<Session, CmdError> {
         }
     }
 
-    Ok(Session { conn, handle })
+    Ok(Session { conn, handle, dead: AtomicBool::new(false) })
 }
 
 impl Session {
-    fn notify<B: serde::Serialize + DynamicType>(&self, method: &str, body: &B) -> Result<(), CmdError> {
-        self.conn
-            .call_method(Some(SERVICE), PATH, Some(INTERFACE), method, body)
+    /// Sends one input event. A failed call did nothing, so after one the
+    /// event is sent again on a new session, in case this one has ended.
+    fn notify<B: serde::Serialize + DynamicType>(
+        &self,
+        method: &str,
+        body: impl Fn(&OwnedObjectPath) -> B,
+    ) -> Result<(), CmdError> {
+        let call = |s: &Session| s.conn.call_method(Some(SERVICE), PATH, Some(INTERFACE), method, &body(&s.handle));
+        if call(self).is_ok() {
+            return Ok(());
+        }
+        self.dead.store(true, Ordering::SeqCst);
+        let retried = session()?;
+        call(&retried)
             .map(|_| ())
-            .map_err(|e| CmdError::os(format!("the RemoteDesktop portal rejected {method}: {e}")))
+            .map_err(|e| {
+                retried.dead.store(true, Ordering::SeqCst);
+                CmdError::os(format!("the RemoteDesktop portal rejected {method}: {e}"))
+            })
     }
 
     fn no_options() -> HashMap<&'static str, Value<'static>> {
@@ -173,25 +199,25 @@ impl Session {
     }
 
     pub fn pointer_motion(&self, dx: f64, dy: f64) -> Result<(), CmdError> {
-        self.notify("NotifyPointerMotion", &(&self.handle, Self::no_options(), dx, dy))
+        self.notify("NotifyPointerMotion", |h| (h.clone(), Self::no_options(), dx, dy))
     }
 
     /// `button` is a Linux evdev button code.
     pub fn pointer_button(&self, button: i32, pressed: bool) -> Result<(), CmdError> {
-        self.notify("NotifyPointerButton", &(&self.handle, Self::no_options(), button, pressed as u32))
+        self.notify("NotifyPointerButton", |h| (h.clone(), Self::no_options(), button, pressed as u32))
     }
 
     /// `axis` is 0 for vertical, 1 for horizontal; positive steps scroll down/right.
     pub fn pointer_axis_discrete(&self, axis: u32, steps: i32) -> Result<(), CmdError> {
-        self.notify("NotifyPointerAxisDiscrete", &(&self.handle, Self::no_options(), axis, steps))
+        self.notify("NotifyPointerAxisDiscrete", |h| (h.clone(), Self::no_options(), axis, steps))
     }
 
     /// `keycode` is a Linux evdev key code.
     pub fn keyboard_keycode(&self, keycode: i32, pressed: bool) -> Result<(), CmdError> {
-        self.notify("NotifyKeyboardKeycode", &(&self.handle, Self::no_options(), keycode, pressed as u32))
+        self.notify("NotifyKeyboardKeycode", |h| (h.clone(), Self::no_options(), keycode, pressed as u32))
     }
 
     pub fn keyboard_keysym(&self, keysym: i32, pressed: bool) -> Result<(), CmdError> {
-        self.notify("NotifyKeyboardKeysym", &(&self.handle, Self::no_options(), keysym, pressed as u32))
+        self.notify("NotifyKeyboardKeysym", |h| (h.clone(), Self::no_options(), keysym, pressed as u32))
     }
 }

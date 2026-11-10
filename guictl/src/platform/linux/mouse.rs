@@ -1,11 +1,15 @@
-use super::{kwin, portal};
+use super::{gnome, kwin, portal};
 use crate::cli::{MouseButton, ScrollDirection};
 use crate::output::CmdError;
 
 pub fn position() -> Result<(i32, i32), CmdError> {
-    let value = kwin::run("var p = workspace.cursorPos;\nreturn [Math.round(p.x), Math.round(p.y)];")?;
+    let value = if gnome::is_gnome() {
+        gnome::call("cursor", serde_json::Value::Null)?
+    } else {
+        kwin::run("var p = workspace.cursorPos;\nreturn [Math.round(p.x), Math.round(p.y)];")?
+    };
     serde_json::from_value(value)
-        .map_err(|e| CmdError::os(format!("unexpected cursor position from KWin: {e}")))
+        .map_err(|e| CmdError::os(format!("unexpected cursor position from the window manager: {e}")))
 }
 
 /// The portal's absolute pointer motion only works relative to a screen-cast

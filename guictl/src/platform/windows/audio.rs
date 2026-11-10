@@ -131,7 +131,7 @@ fn session_simple_volume(app: &str) -> Result<ISimpleAudioVolume, CmdError> {
                 Err(_) => continue,
             };
             let pid = control2.GetProcessId().unwrap_or(0);
-            if pid != 0 && super::window::process_name(pid).eq_ignore_ascii_case(app) {
+            if pid != 0 && super::window::matches_app(&super::window::process_name(pid), app) {
                 return control2
                     .cast::<ISimpleAudioVolume>()
                     .map_err(|e| CmdError::os(e.to_string()));

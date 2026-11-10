@@ -96,6 +96,9 @@ fn monitor_info(output: &Value) -> MonitorInfo {
 }
 
 pub fn list() -> Result<Vec<MonitorInfo>, CmdError> {
+    if super::gnome::is_gnome() {
+        return super::mutter::list();
+    }
     Ok(outputs()?.iter().map(monitor_info).collect())
 }
 
@@ -115,7 +118,7 @@ fn parse_pair(spec: &str, sep: char, what: &str) -> Result<(i32, i32), CmdError>
 /// Picks the mode id for the requested resolution and/or refresh rate,
 /// keeping whichever of the two wasn't given as close as possible to the
 /// current mode.
-fn pick_mode(
+pub(super) fn pick_mode(
     output: &Value,
     resolution: Option<&str>,
     refresh_rate: Option<u32>,
@@ -163,6 +166,10 @@ pub fn set(
     make_primary: bool,
     enabled: Option<bool>,
 ) -> Result<(), CmdError> {
+    if super::gnome::is_gnome() {
+        let position = position.map(|spec| parse_pair(spec, ',', "--position")).transpose()?;
+        return super::mutter::set(id, resolution, refresh_rate, rotation, position, make_primary, enabled);
+    }
     let output = &output(id)?;
 
     let mut args: Vec<String> = Vec::new();
@@ -212,6 +219,9 @@ pub fn set(
 /// an excluded output went dark with the rest, so with more than one monitor
 /// attached this refuses rather than blank them all.
 pub fn power(id: &str, on: bool) -> Result<(), CmdError> {
+    if super::gnome::is_gnome() {
+        return super::mutter::power(id, on);
+    }
     let monitors = list()?;
     if !monitors.iter().any(|m| m.id == id) {
         return Err(CmdError::not_found(format!("no monitor with id {id}")));

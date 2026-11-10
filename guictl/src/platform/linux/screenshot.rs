@@ -1,4 +1,4 @@
-use super::{dbus, kwin};
+use super::{dbus, gnome, kwin};
 use crate::output::CmdError;
 use crate::platform::Screenshot;
 use image::{Rgba, RgbaImage};
@@ -71,10 +71,58 @@ fn meta_u32(meta: &HashMap<String, OwnedValue>, key: &str) -> Result<u32, CmdErr
         .ok_or_else(|| CmdError::os(format!("KWin's screenshot reply has no usable '{key}'")))
 }
 
+/// Captures through guictl's GNOME Shell extension, which writes a PNG for
+/// guictl to read. The shell captures at the screen's real resolution, so on a
+/// scaled display the image is brought down to logical pixels, the coordinates
+/// every other command works in.
+fn capture_gnome(target: &Target, cursor: bool) -> Result<RgbaImage, CmdError> {
+    let file = gnome::TempFile::new("screenshot.png");
+    let (args, logical) = match target {
+        Target::Workspace => {
+            let monitors = super::monitor::list()?;
+            let attached = || monitors.iter().filter(|m| m.attached);
+            let left = attached().map(|m| m.x).min().unwrap_or(0);
+            let top = attached().map(|m| m.y).min().unwrap_or(0);
+            let right = attached().map(|m| m.x + m.width).max().unwrap_or(0);
+            let bottom = attached().map(|m| m.y + m.height).max().unwrap_or(0);
+            (serde_json::json!({ "target": "workspace", "cursor": cursor }), (right - left, bottom - top))
+        }
+        Target::Monitor(id) => {
+            let m = super::monitor::find(id)?;
+            (
+                serde_json::json!({ "target": "area", "x": m.x, "y": m.y, "w": m.width, "h": m.height }),
+                (m.width, m.height),
+            )
+        }
+        Target::Window(id) => {
+            let (_, _, w, h) = super::window::rect(super::window::parse_id(id)?)?;
+            (serde_json::json!({ "target": "window", "id": id }), (w, h))
+        }
+        Target::Region(r) => (
+            serde_json::json!({ "target": "area", "x": r.x, "y": r.y, "w": r.w, "h": r.h }),
+            (r.w, r.h),
+        ),
+    };
+    let mut args = args;
+    args["path"] = serde_json::Value::from(file.path());
+    gnome::call("screenshot", args)?;
+    let img = image::open(&file.0)
+        .map_err(|e| CmdError::os(format!("could not read the screenshot GNOME Shell took: {e}")))?
+        .into_rgba8();
+    let (w, h) = (logical.0.max(1) as u32, logical.1.max(1) as u32);
+    if img.dimensions() == (w, h) || logical.0 <= 0 || logical.1 <= 0 {
+        return Ok(img);
+    }
+    Ok(image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle))
+}
+
 /// Captures through KWin's own `ScreenShot2` interface: it hands back raw
 /// pixels over a pipe with no interactive picker (unlike the XDG screenshot
 /// portal), and can capture a window's contents even when it's covered.
 fn capture(target: &Target, cursor: bool) -> Result<RgbaImage, CmdError> {
+    if gnome::is_gnome() {
+        return capture_gnome(target, cursor);
+    }
     let conn = dbus::session()?;
     let (mut reader, writer) =
         std::io::pipe().map_err(|e| CmdError::os(format!("could not create a pipe: {e}")))?;

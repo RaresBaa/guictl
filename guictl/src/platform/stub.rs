@@ -455,3 +455,7 @@ pub mod input {
         unsupported("--stop-on-user-input")
     }
 }
+
+pub fn guide() -> String {
+    GUIDE.to_string()
+}

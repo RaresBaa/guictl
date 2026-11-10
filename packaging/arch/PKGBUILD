@@ -3,7 +3,7 @@
 pkgname=guictl-git
 pkgver=0.1.0.r0.g0000000
 pkgrel=1
-pkgdesc="Control a desktop GUI from the command line, for AI agents (KDE Plasma 6 on Wayland)"
+pkgdesc="Control a desktop GUI from the command line, for AI agents (KDE Plasma 6 or GNOME on Wayland)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/RaresBaa/guictl"
 license=('MIT')
@@ -11,13 +11,15 @@ depends=(
   'glibc'
   'libgcc'
   'at-spi2-core'       # element commands
-  'kservice'           # kbuildsycoca6, for guictl setup
-  'libkscreen'         # kscreen-doctor, for monitor commands
   'libpulse'           # pactl, for audio commands
   'tesseract'          # ocr
   'tesseract-data-eng' # tesseract alone may pull in a different language
-  'wl-clipboard'       # clipboard commands
   'xdg-utils'          # xdg-open, for launch
+)
+optdepends=(
+  'kservice: guictl setup on KDE Plasma (kbuildsycoca6)'
+  'libkscreen: monitor commands on KDE Plasma (kscreen-doctor)'
+  'wl-clipboard: clipboard images on KDE Plasma'
 )
 makedepends=('cargo' 'git')
 provides=('guictl')

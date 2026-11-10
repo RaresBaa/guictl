@@ -15,7 +15,7 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindow, GetWindowRect, GW_OWNER, SW_SHOW, GetWindowTextW, GetWindowThreadProcessId,
-    IsHungAppWindow, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SetForegroundWindow, SetWindowPos,
+    IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, IsZoomed, PostMessageW, SetForegroundWindow, SetWindowPos,
     ShowWindow, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE,
     SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
 };
@@ -190,9 +190,22 @@ pub fn list(app_filter: Option<&str>) -> Result<Vec<WindowInfo>, CmdError> {
         w.z_order = i as u32;
     }
     if let Some(app) = app_filter {
-        windows.retain(|w| w.app.eq_ignore_ascii_case(app));
+        windows.retain(|w| matches_app(&w.app, app));
     }
     Ok(windows)
+}
+
+/// Whether the process name `process` (e.g. `notepad.exe`) is the app the
+/// user named, with or without the `.exe`, ignoring case.
+pub(crate) fn matches_app(process: &str, app: &str) -> bool {
+    fn stem(name: &str) -> &str {
+        let cut = name.len().wrapping_sub(4);
+        match name.get(cut..) {
+            Some(ext) if cut > 0 && ext.eq_ignore_ascii_case(".exe") => &name[..cut],
+            _ => name,
+        }
+    }
+    stem(process).eq_ignore_ascii_case(stem(app))
 }
 
 pub fn active() -> Result<WindowInfo, CmdError> {
@@ -210,7 +223,11 @@ pub fn active() -> Result<WindowInfo, CmdError> {
 pub(crate) fn parse_id(id: &str) -> Result<HWND, CmdError> {
     let raw = usize::from_str_radix(id.trim_start_matches("0x"), 16)
         .map_err(|_| CmdError::invalid_args(format!("invalid window id: {id}")))?;
-    Ok(HWND(raw as *mut _))
+    let hwnd = HWND(raw as *mut _);
+    if raw == 0 || !unsafe { IsWindow(hwnd) }.as_bool() {
+        return Err(CmdError::not_found(format!("no window {id}; it may have closed, check `window list`")));
+    }
+    Ok(hwnd)
 }
 
 pub fn resolve(
@@ -239,7 +256,7 @@ pub fn resolve(
     let windows = list(None)?;
     let found = windows.into_iter().find(|w| {
         title.is_none_or(|t| w.title.to_lowercase().contains(&t.to_lowercase()))
-            && app.is_none_or(|a| w.app.eq_ignore_ascii_case(a))
+            && app.is_none_or(|a| matches_app(&w.app, a))
             && pid.is_none_or(|p| w.pid == p)
     });
     match found {
@@ -355,4 +372,20 @@ pub fn pin(hwnd: HWND, on: bool) -> Result<(), CmdError> {
     let after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
     unsafe { SetWindowPos(hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE) }
         .map_err(|e| CmdError::os(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_app;
+
+    #[test]
+    fn app_matches_with_or_without_exe() {
+        assert!(matches_app("notepad.exe", "notepad.exe"));
+        assert!(matches_app("notepad.exe", "notepad"));
+        assert!(matches_app("Notepad.EXE", "NOTEPAD"));
+        assert!(matches_app("notepad.exe", "Notepad.Exe"));
+        assert!(!matches_app("notepad.exe", "note"));
+        assert!(!matches_app("notepad++.exe", "notepad"));
+        assert!(!matches_app("exe", ".exe"));
+    }
 }

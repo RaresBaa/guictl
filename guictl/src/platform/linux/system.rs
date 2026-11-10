@@ -26,12 +26,23 @@ pub fn open(target: &str) -> Result<(), CmdError> {
         .map_err(|e| CmdError::os(format!("could not run xdg-open: {e}")))
 }
 
+/// The screen saver's name, object and interface. GNOME's stand-in for the
+/// freedesktop one only does inhibition, so lock state goes to its own.
+fn screensaver() -> (&'static str, &'static str, &'static str) {
+    if super::gnome::is_gnome() {
+        ("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver", "org.gnome.ScreenSaver")
+    } else {
+        ("org.freedesktop.ScreenSaver", "/ScreenSaver", "org.freedesktop.ScreenSaver")
+    }
+}
+
 pub fn lock() -> Result<(), CmdError> {
+    let (service, path, interface) = screensaver();
     dbus::session()?
         .call_method(
-            Some("org.freedesktop.ScreenSaver"),
-            "/ScreenSaver",
-            Some("org.freedesktop.ScreenSaver"),
+            Some(service),
+            path,
+            Some(interface),
             "Lock",
             &(),
         )
@@ -66,11 +77,12 @@ pub(super) fn check_unlocked() -> Result<(), CmdError> {
 }
 
 fn is_locked() -> Result<bool, CmdError> {
+    let (service, path, interface) = screensaver();
     dbus::session()?
         .call_method(
-            Some("org.freedesktop.ScreenSaver"),
-            "/ScreenSaver",
-            Some("org.freedesktop.ScreenSaver"),
+            Some(service),
+            path,
+            Some(interface),
             "GetActive",
             &(),
         )
@@ -78,10 +90,25 @@ fn is_locked() -> Result<bool, CmdError> {
         .map_err(dbus::err)
 }
 
-/// Whether the screen is locked. Wayland doesn't tell a client how long the
-/// session has been idle, so the second value is always None here.
+/// Whether the screen is locked, and on GNOME for how long nobody has used
+/// the mouse or keyboard. Wayland itself doesn't tell a client that, so on
+/// Plasma the second value is always None.
 pub fn status() -> Result<(bool, Option<u64>), CmdError> {
-    Ok((is_locked()?, None))
+    let idle = if super::gnome::is_gnome() { gnome_idle_ms().ok() } else { None };
+    Ok((is_locked()?, idle))
+}
+
+fn gnome_idle_ms() -> Result<u64, CmdError> {
+    dbus::session()?
+        .call_method(
+            Some("org.gnome.Mutter.IdleMonitor"),
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            Some("org.gnome.Mutter.IdleMonitor"),
+            "GetIdletime",
+            &(),
+        )
+        .and_then(|reply| reply.body().deserialize())
+        .map_err(dbus::err)
 }
 
 /// Holds the display/system awake for `duration_ms`, then releases it. Because this is a

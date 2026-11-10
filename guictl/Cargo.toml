@@ -1,9 +1,13 @@
 [package]
 name = "guictl"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 description = "Control a desktop GUI from the command line, for AI agents."
+repository = "https://github.com/RaresBaa/guictl"
+readme = "../README.md"
+keywords = ["gui-automation", "ai-agents", "computer-use", "desktop", "wayland"]
+categories = ["command-line-utilities", "accessibility", "os::windows-apis", "os::linux-apis"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
